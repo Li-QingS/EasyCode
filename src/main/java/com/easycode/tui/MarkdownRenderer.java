@@ -84,5 +84,5 @@ public final class MarkdownRenderer implements StreamHandler {
     }
 
     @Override public void onToolCall(ToolCall call) { delegate.onToolCall(call); }
-    @Override public void onUsage(int in, int out) { delegate.onUsage(in, out); }
+    @Override public void onUsage(int in, int out, int cacheWrite, int cacheRead) { delegate.onUsage(in, out, cacheWrite, cacheRead); }
 }

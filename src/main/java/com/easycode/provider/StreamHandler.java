@@ -4,8 +4,9 @@ package com.easycode.provider;
 public interface StreamHandler {
     void onToken(String token);
 
+    default void onThinking(String thinking) {}
     default void onToolCall(ToolCall call) {}
-    default void onUsage(int inputTokens, int outputTokens) {}
+    default void onUsage(int inputTokens, int outputTokens, int cacheWriteTokens, int cacheReadTokens) {}
     default void onComplete() {}
     default void onError(Exception e) {}
 }

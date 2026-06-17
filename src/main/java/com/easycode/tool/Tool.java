@@ -58,6 +58,12 @@ public interface Tool {
     /** 是否为破坏性工具（如 exec_command 可执行任意命令） */
     default boolean isDestructive() { return false; }
 
+    /** 工具分类 */
+    enum Category { SEARCH, FILE, SHELL }
+
+    /** 工具所属分类 */
+    Category category();
+
     /** 默认启用状态 */
     enum State { ENABLED, DISABLED, APPROVAL_REQUIRED }
 

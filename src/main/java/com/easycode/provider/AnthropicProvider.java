@@ -15,15 +15,13 @@ import java.net.http.HttpRequest;
 import java.util.List;
 import java.util.concurrent.Flow;
 
-/** Anthropic Messages API 实现：流式对话 + 工具调用解析 */
 public final class AnthropicProvider implements LlmProvider {
 
     private static final ObjectMapper json = new ObjectMapper();
+    private static final boolean DEBUG_SSE = false;
 
     private final Config config;
     private final HttpClient httpClient;
-
-    // 工具调用中间状态
     private StringBuilder toolCallBuilder;
     private String toolCallId;
     private String toolCallName;
@@ -34,9 +32,9 @@ public final class AnthropicProvider implements LlmProvider {
     }
 
     @Override
-    public void chatStream(List<MessageRecord> history, List<JsonNode> tools, StreamHandler handler) {
+    public void chatStream(Request req, StreamHandler handler) {
         try {
-            String requestBody = buildRequestBody(history, tools);
+            String requestBody = buildRequestJson(req);
             HttpRequest request = HttpRequest.newBuilder()
                     .uri(URI.create(config.baseUrl() + "/v1/messages"))
                     .header("x-api-key", config.apiKey())
@@ -59,30 +57,38 @@ public final class AnthropicProvider implements LlmProvider {
         }
     }
 
-    private String buildRequestBody(List<MessageRecord> history, List<JsonNode> tools)
-            throws JsonProcessingException {
-        String body = doBuildRequestBody(history, tools);
-        System.err.println("[DEBUG] 请求体大小: " + body.length() + " 字符, " + body.getBytes(java.nio.charset.StandardCharsets.UTF_8).length + " 字节");
-        return body;
-    }
-
-    private String doBuildRequestBody(List<MessageRecord> history, List<JsonNode> tools)
-            throws JsonProcessingException {
+    private String buildRequestJson(Request req) throws JsonProcessingException {
         ObjectNode root = json.createObjectNode();
         root.put("model", config.model());
         root.put("stream", true);
         root.put("max_tokens", 8192);
-        root.put("system", config.systemPromptSafe());
 
-        // tools
-        if (tools != null && !tools.isEmpty()) {
-            ArrayNode toolsArr = root.putArray("tools");
-            tools.forEach(toolsArr::add);
+        // system: 数组格式，第一个块带 cache_control
+        com.easycode.provider.System sys = req.system();
+        ArrayNode systemArr = root.putArray("system");
+        if (sys.stable() != null && !sys.stable().isEmpty()) {
+            ObjectNode stableBlock = systemArr.addObject();
+            stableBlock.put("type", "text");
+            stableBlock.put("text", sys.stable());
+            stableBlock.putObject("cache_control").put("type", "ephemeral");
+        }
+        if (sys.environment() != null && !sys.environment().isEmpty()) {
+            ObjectNode envBlock = systemArr.addObject();
+            envBlock.put("type", "text");
+            envBlock.put("text", sys.environment());
         }
 
-        // messages：block 结构序列化
+        // tools
+        if (req.tools() != null && !req.tools().isEmpty()) {
+            ArrayNode toolsArr = root.putArray("tools");
+            req.tools().forEach(toolsArr::add);
+        }
+
+        // messages
         ArrayNode messages = root.putArray("messages");
-        for (MessageRecord msg : history) {
+        List<MessageRecord> history = req.messages();
+        for (int i = 0; i < history.size(); i++) {
+            MessageRecord msg = history.get(i);
             ObjectNode m = messages.addObject();
             m.put("role", msg.role() == Role.USER ? "user" : "assistant");
             if (!msg.blocks().isEmpty()) {
@@ -90,16 +96,29 @@ public final class AnthropicProvider implements LlmProvider {
                 for (MessageBlock block : msg.blocks()) {
                     serializeBlock(content, block);
                 }
+                // reminder 注入：如果是最后一条 user 消息且有 reminder
+                if (i == history.size() - 1 && msg.role() == Role.USER
+                        && req.reminder() != null && !req.reminder().isEmpty()) {
+                    ObjectNode remBlock = content.addObject();
+                    remBlock.put("type", "text");
+                    remBlock.put("text", req.reminder());
+                }
             } else if (msg.content() != null && !msg.content().isEmpty()) {
-                m.put("content", msg.content());
+                ArrayNode content = m.putArray("content");
+                ObjectNode textBlock = content.addObject();
+                textBlock.put("type", "text");
+                textBlock.put("text", msg.content());
+                // reminder 注入：如果是最后一条 user 消息
+                if (i == history.size() - 1 && msg.role() == Role.USER
+                        && req.reminder() != null && !req.reminder().isEmpty()) {
+                    ObjectNode remBlock = content.addObject();
+                    remBlock.put("type", "text");
+                    remBlock.put("text", req.reminder());
+                }
             }
         }
 
-        // Claude 模型启用 extended thinking
-        if (config.model() != null && config.model().toLowerCase().contains("claude")) {
-            root.putObject("thinking").put("type", "enabled").put("budget_tokens", 4000);
-        }
-
+        root.putObject("thinking").put("type", "enabled").put("budget_tokens", 4000);
         return json.writeValueAsString(root);
     }
 
@@ -123,11 +142,9 @@ public final class AnthropicProvider implements LlmProvider {
         }
     }
 
-    private static final boolean DEBUG_SSE = false;
-
     private void parseSSELine(String line, StreamHandler handler) {
         if (line == null || line.isBlank() || !line.startsWith("data: ")) return;
-        if (DEBUG_SSE) System.err.println("[SSE] " + line.substring(0, Math.min(line.length(), 200)));
+        if (DEBUG_SSE) java.lang.System.err.println("[SSE] " + line.substring(0, Math.min(line.length(), 200)));
         String data = line.substring(6);
         try {
             JsonNode node = json.readTree(data);
@@ -140,6 +157,9 @@ public final class AnthropicProvider implements LlmProvider {
             if ("text_delta".equals(dt)) {
                 JsonNode t = delta.get("text");
                 if (t != null && !t.isNull()) handler.onToken(t.asText());
+            } else if ("thinking_delta".equals(dt)) {
+                JsonNode th = delta.get("thinking");
+                if (th != null && !th.isNull()) handler.onThinking(th.asText());
             } else if ("input_json_delta".equals(dt)) {
                 JsonNode p = delta.get("partial_json");
                 if (p != null && toolCallBuilder != null) toolCallBuilder.append(p.asText());
@@ -166,7 +186,9 @@ public final class AnthropicProvider implements LlmProvider {
             if (usage != null) {
                 int in = usage.has("input_tokens") ? usage.get("input_tokens").asInt() : 0;
                 int out = usage.has("output_tokens") ? usage.get("output_tokens").asInt() : 0;
-                handler.onUsage(in, out);
+                int cacheWrite = usage.has("cache_creation_input_tokens") ? usage.get("cache_creation_input_tokens").asInt() : 0;
+                int cacheRead = usage.has("cache_read_input_tokens") ? usage.get("cache_read_input_tokens").asInt() : 0;
+                handler.onUsage(in, out, cacheWrite, cacheRead);
             }
         }
         } catch (JsonProcessingException ignored) {}

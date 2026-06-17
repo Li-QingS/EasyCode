@@ -1,110 +1,79 @@
-# EasyCode
+# EasyCode — 终端 AI 编程助手
 
-终端 AI 编程助手——类似 Claude Code，Java 实现。
+Java 17 实现，ReAct Agent Loop 自动循环调用工具直到任务完成。
 
 ## 技术栈
 
-- Java 17 + Maven
-- JLine 3.x（终端交互）
-- Jackson（JSON / YAML 解析）
-- JDK 内置 HttpClient（SSE 流式消费）
-- JUnit 5（单元测试）
+Java 17 + Maven | JLine 3.x | Jackson | JDK HttpClient (SSE) | JUnit 5 | ripgrep
 
-## 当前功能
+## 工具矩阵
 
-### 流式对话
-- 支持 Anthropic 协议（含 DeepSeek 兼容 API）
-- SSE 逐 token 输出，带 spinner 动画和耗时显示
-- Markdown→ANSI 渲染（粗体、标题）
-- 多轮对话 + 上下文窗口管理
+| 工具 | 分类 | 权限 | 确认 | 破坏性 | 功能 |
+|------|------|------|------|--------|------|
+| `read_file` | FILE | 只读 | 否 | 否 | 读取文件(行号+offset+limit) |
+| `write_file` | FILE | 读写 | 是 | 否 | 创建/覆盖文件 |
+| `edit_file` | FILE | 读写 | 是 | 否 | 唯一匹配替换(返回diff) |
+| `exec_command` | SHELL | 读写 | 是 | **是** | shell命令(退出码语义表) |
+| `find_files` | SEARCH | 只读 | 否 | 否 | glob递归(时间倒序, 排无意义目录) |
+| `grep_code` | SEARCH | 只读 | 否 | 否 | 正则搜索(rg, 支持fileFilter/contextLines) |
 
-### 工具系统
-
-| 工具 | 权限 | 确认 | 功能 |
-|------|------|------|------|
-| `read_file` | 只读 | 否 | 读取文件内容 |
-| `find_files` | 只读 | 否 | glob 模式查找文件 |
-| `grep_code` | 只读 | 否 | 正则搜索代码内容 |
-| `write_file` | 读写 | 是 | 创建/覆盖文件 |
-| `edit_file` | 读写 | 是 | 唯一匹配替换 |
-| `exec_command` | 读写 | 是 | 执行 shell 命令 |
-
-- 统一 `Tool` 接口（name / description / inputSchema / execute）
-- 权限分级：只读自动执行，读写工具终端 `[y/n]` 确认
-- 超时保护（默认 30s）+ 危险命令拦截
-- 工具结果回灌对话历史，模型据此给出最终回答
+- 统一 `Tool` 接口: name/description/inputSchema/execute/permission/category
+- 分类元信息: SEARCH/FILE/SHELL, ToolRegistry 按分类管理、按权限过滤
+- 权限分级: 只读自动, 读写 `[y/n]` 确认
+- 破坏性标记: 仅 exec_command
+- Plan Mode: `/plan` 仅注入只读工具, `/do` 恢复全部
+- 退出码语义表: grep/diff/find 退出码1≠错误
+- 路径清洗统一: `Tool.resolvePath()` 反斜杠/Windows盘符自动转换
 
 ## 配置
-
-项目根目录下的 `easycode.yaml`（参考 `easycode.yaml.example`）：
 
 ```yaml
 protocol: anthropic
 model: deepseek-v4-flash
 base_url: https://api.deepseek.com/anthropic
 api_key: sk-xxx
-
-# 可选字段（省略用默认值）
-context_window: 128000   # 上下文窗口 token 上限
-tool_timeout: 30         # 工具执行超时秒数
-system_prompt: "..."     # 自定义 system prompt
+# 可选: context_window, tool_timeout, system_prompt
 ```
 
 ## 构建与运行
 
 ```bash
-# 编译
 cd "/mnt/d/agent project/EasyCode"
-mvn compile
-
-# 测试（23 个用例）
-mvn test
-
-# 启动（WSL）
-java -cp "target/classes:$(cat /tmp/cp.txt)" com.easycode.Main
-
-# 打包 fat JAR（Windows 直接 java -jar）
-mvn package -DskipTests
-```
-
-## 项目结构
-
-```
-EasyCode/
-├── pom.xml
-├── easycode.yaml.example
-├── CODEX.md                    # 项目上下文配置
-├── 问题及解决方法.md             # 开发问题记录
-└── src/
-    ├── main/java/com/easycode/
-    │   ├── Main.java           # 入口
-    │   ├── config/             # Config / ConfigLoader
-    │   ├── provider/           # LlmProvider / AnthropicProvider / StreamHandler
-    │   ├── tool/               # Tool 接口 + 6 个实现 + ToolRegistry
-    │   ├── conversation/       # MessageRecord / ConversationMgr
-    │   └── tui/                # Tui / MarkdownRenderer
-    └── test/java/com/easycode/
-        ├── config/             # ConfigLoaderTest
-        ├── conversation/       # ConversationMgrTest / ConversationMgrTrimTest
-        ├── provider/           # ProviderFactoryTest
-        └── tool/               # ToolRegistryTest / EditFileToolTest / ExecCommandToolTest
+mvn compile          # 编译
+mvn test             # 31 个用例
+java -cp "target/classes:$(cat /tmp/cp.txt)" com.easycode.Main   # 启动
 ```
 
 ## 架构
 
 ```
-用户输入 → TUI (JLine)
+用户输入 → TUI (JLine + spinner + Markdown→ANSI 流式渲染)
+              │  AgentEvent 事件流解耦
+              ▼
+         AgentLoop (ReAct 主循环, 最多10轮, 5种停止条件)
+              │  ├─ 每轮: 构建tools JSON → provider.chatStream()
+              │  ├─ StreamingCollector 双路收集(实时+累积)
+              │  ├─ thinking 兜底(text为空时用thinking回复)
+              │  └─ 完成判定: toolCalls空+text非空 → 返回
               │
               ▼
-         ConversationMgr (窗口裁剪)
+         ToolExecutor (连续只读并发, 有副作用串行, 30s超时)
               │
               ▼
-         LlmProvider (AnthropicProvider)
-              │  SSE 流式消费
-              │  ├─ text_delta → onToken → 逐字打印
+         AnthropicProvider / OpenAIProvider (SSE + sendAsync)
+              │  ├─ text_delta → onToken → TextDelta事件
+              │  ├─ thinking_delta → onThinking → thinking兜底
               │  ├─ tool_use → onToolCall → 执行工具 → 灌回历史
-              │  └─ usage → onUsage
+              │  └─ usage → onUsage → 累计Token统计
               │
               ▼
-         ToolRegistry → Tool.execute()
+         ToolRegistry (按Category分类, 按Permission过滤)
 ```
+
+## 设计文档
+
+`docs/ch02/` — 纯对话 spec/plan/task/checklist
+`docs/ch03/` — 工具系统 spec/plan/task/checklist
+`docs/ch04/` — Agent Loop spec/plan/task/checklist
+`CODEX.md` — 项目上下文 + 工具描述规范 + 调试原则
+`问题及解决方法.md` — 开发问题记录 (30+个)

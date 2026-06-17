@@ -1,7 +1,9 @@
 package com.easycode;
 
+import com.easycode.agent.AgentLoop;
 import com.easycode.config.Config;
 import com.easycode.config.ConfigLoader;
+import com.easycode.conversation.ConversationMgr;
 import com.easycode.provider.LlmProvider;
 import com.easycode.provider.ProviderFactory;
 import com.easycode.tui.Tui;
@@ -22,7 +24,9 @@ public final class Main {
             registry.register(new ExecCommandTool());
             registry.register(new FindFilesTool());
             registry.register(new GrepCodeTool());
-            Tui tui = new Tui(provider, registry, config);
+            ConversationMgr conversation = new ConversationMgr();
+            AgentLoop agentLoop = new AgentLoop(provider, registry, conversation, config, "1.0.0");
+            Tui tui = new Tui(agentLoop, registry, conversation, config);
             tui.start();
         } catch (Exception e) {
             System.err.println("启动失败: " + e.getMessage());

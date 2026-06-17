@@ -54,6 +54,7 @@ public final class WriteFileTool implements Tool {
 
     @Override public Permission permission() { return Permission.READ_WRITE; }
     @Override public boolean requiresApproval() { return true; }
+    @Override public Category category() { return Category.FILE; }
     @Override public boolean isDestructive() { return false; }
     @Override public State defaultState() { return State.APPROVAL_REQUIRED; }
 }

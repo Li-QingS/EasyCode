@@ -1,5 +1,7 @@
 package com.easycode.conversation;
 
+import com.easycode.provider.ToolCall;
+import com.fasterxml.jackson.databind.JsonNode;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
@@ -28,6 +30,24 @@ public final class ConversationMgr {
     /** 追加任意消息（含 block 结构） */
     public void addMessage(MessageRecord msg) {
         history.add(msg);
+    }
+
+    /** 追加工具调用消息 */
+    public void addToolUse(ToolCall call) {
+        history.add(new MessageRecord(Role.ASSISTANT, "",
+                List.of(new MessageBlock.ToolUseBlock(call.id(), call.name(), call.input()))));
+    }
+
+    /** 追加工具调用消息（接受分散参数） */
+    public void addToolUse(String toolId, String toolName, JsonNode input) {
+        history.add(new MessageRecord(Role.ASSISTANT, "",
+                List.of(new MessageBlock.ToolUseBlock(toolId, toolName, input))));
+    }
+
+    /** 追加工具结果消息 */
+    public void addToolResult(String toolUseId, String content, boolean isError) {
+        history.add(new MessageRecord(Role.USER, "",
+                List.of(new MessageBlock.ToolResultBlock(toolUseId, content, isError))));
     }
 
     /** 设置 system prompt，注入到历史第一条 */

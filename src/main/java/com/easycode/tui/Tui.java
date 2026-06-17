@@ -1,25 +1,18 @@
 package com.easycode.tui;
 
+import com.easycode.agent.AgentEvent;
+import com.easycode.agent.AgentLoop;
 import com.easycode.config.Config;
 import com.easycode.conversation.ConversationMgr;
-import com.easycode.conversation.MessageBlock;
-import com.easycode.conversation.MessageRecord;
-import com.easycode.conversation.Role;
-import com.easycode.provider.LlmProvider;
-import com.easycode.provider.StreamHandler;
-import com.easycode.provider.ToolCall;
-import com.easycode.tool.Tool;
 import com.easycode.tool.ToolRegistry;
 import com.easycode.tool.ToolResult;
-import com.fasterxml.jackson.databind.JsonNode;
 import org.jline.reader.LineReader;
 import org.jline.reader.LineReaderBuilder;
 import org.jline.terminal.Terminal;
 import org.jline.terminal.TerminalBuilder;
 import java.io.IOException;
-import java.util.List;
 
-/** JLine 交互界面，含工具调用执行 */
+/** JLine 交互界面，含 AgentLoop 事件消费 */
 public final class Tui {
 
     private static final String PROMPT = "> ";
@@ -30,18 +23,30 @@ public final class Tui {
     private static final String cyan = "\033[36m";
     private static final String green = "\033[32m";
     private static final String bold = "\033[1m";
+    private static final String boldOff = "\033[22m";
+    private static final String magenta = "\033[35m";
+    private static final String blue = "\033[34m";
     private static final String[] SPINNER = {"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"};
 
-    private final LlmProvider provider;
-    private final ConversationMgr conversation;
+    private final AgentLoop agentLoop;
     private final ToolRegistry tools;
-    private final Config config;
 
-    public Tui(LlmProvider provider, ToolRegistry tools, Config config) {
-        this.provider = provider;
-        this.conversation = new ConversationMgr();
+    private int totalInputTokens;
+    private int totalOutputTokens;
+    private int currentRound;
+    private volatile boolean spinnerRunning;
+    private Thread spinnerThread;
+
+    // Markdown 流式渲染状态
+    private boolean mdBold;
+    private boolean mdCode;
+    private boolean mdPendingStar;
+    private boolean mdAtLineStart = true;
+    private int mdHeadingHashes;
+
+    public Tui(AgentLoop agentLoop, ToolRegistry tools, ConversationMgr conversation, Config config) {
+        this.agentLoop = agentLoop;
         this.tools = tools;
-        this.config = config;
     }
 
     public void start() throws IOException {
@@ -65,176 +70,235 @@ public final class Tui {
 
             if ("/exit".equals(line)) break;
             if ("/help".equals(line)) { printHelp(); continue; }
+            if ("/plan".equals(line)) {
+                agentLoop.setPlanMode(true);
+                System.out.println(green + "  已进入 Plan Mode（仅只读工具）" + reset);
+                System.out.println(dim + "  模型将产出计划，不会改动文件。输入 /do 开始执行。" + reset);
+                continue;
+            }
+            if ("/do".equals(line)) {
+                agentLoop.setPlanMode(false);
+                System.out.println(green + "  已进入 Do Mode（全工具可用）" + reset);
+                System.out.println(dim + "  模型将按上文计划执行。" + reset);
+                continue;
+            }
 
-            conversation.addUserMessage(line);
-            conversation.trimToWindow(config.contextWindow());
-            startStreamingChat();
+            startStreamingChat(line);
         }
         terminal.close();
     }
 
     private void printWelcome() {
         System.out.println();
-        System.out.println(cyan + bold + "  ╔══════════════════════════╗" + reset);
-        System.out.println(cyan + bold + "  ║" + reset + "      EasyCode v1.0.0      " + cyan + bold + "║" + reset);
-        System.out.println(cyan + bold + "  ║" + reset + "  Terminal AI Assistant    " + cyan + bold + "║" + reset);
-        System.out.println(cyan + bold + "  ╚══════════════════════════╝" + reset);
+        System.out.println(cyan + "    ███████╗ █████╗ ███████╗██╗   ██╗" + reset);
+        System.out.println(cyan + "    ██╔════╝██╔══██╗██╔════╝╚██╗ ██╔╝" + reset);
+        System.out.println(blue + "    █████╗  ███████║███████╗ ╚████╔╝ " + reset);
+        System.out.println(blue + "    ██╔══╝  ██╔══██║╚════██║  ╚██╔╝  " + reset);
+        System.out.println(magenta + " ███████╗██║  ██║███████║   ██║   " + bold + " CODE" + reset);
+        System.out.println(magenta + " ╚══════╝╚═╝  ╚═╝╚══════╝   ╚═╝   " + reset);
         System.out.println();
-        System.out.println("  " + dim + "输入问题 · /help 查看命令 · /exit 退出" + reset);
+        System.out.println("   " + dim + "⚡ Terminal AI Assistant — 智能编程助手" + reset);
+        System.out.println();
+        System.out.println("   " + cyan + "─────────────────────────────────────────" + reset);
+        System.out.println("   " + dim + "💬 输入问题   " + reset + "·" + dim + "  /plan 计划   " + reset + "·" + dim + "  /do 执行" + reset);
+        System.out.println("   " + dim + "❓ /help 帮助 " + reset + "·" + dim + "  /exit 退出" + reset);
+        System.out.println("   " + cyan + "─────────────────────────────────────────" + reset);
         System.out.println();
     }
-
     private void printHelp() {
         System.out.println();
-        System.out.println(bold + "命令：" + reset + "  /exit 退出  /help 帮助  Ctrl+D 退出");
-        System.out.println(bold + "工具：" + reset + "  " + String.join(" ", tools.toToolsJson().stream().map(n -> n.get("name").asText()).toList()));
+        System.out.println(bold + "命令：" + reset + "  /exit 退出  /help 帮助  /plan 计划模式  /do 执行模式  Ctrl+D 退出");
+        System.out.println(bold + "工具：" + reset);
+        for (var entry : tools.byCategory().entrySet()) {
+            System.out.println("  " + entry.getKey().name().toLowerCase() + ": " + String.join(", ", entry.getValue()));
+        }
         System.out.println();
     }
 
-    // ========== 对话流程 ==========
+    // ========== Agent Loop 事件处理 ==========
 
-    private boolean needFollowUp;
+    private long startTime;
+    private boolean lastEventWasTool;
+    private StringBuilder currentPreamble;
 
-    private void startStreamingChat() {
-        needFollowUp = false;
-        doStreamingChat(conversation.getHistory());
-        if (needFollowUp) {
-            needFollowUp = false;
-            System.out.println(dim + "[二次请求] 发起第二次 chatStream..." + reset);
-            doStreamingChat(conversation.getHistory());
+    private void startStreamingChat(String userMessage) {
+        totalInputTokens = 0;
+        totalOutputTokens = 0;
+        currentRound = 0;
+        startTime = System.currentTimeMillis();
+        lastEventWasTool = false;
+        currentPreamble = new StringBuilder();
+        mdBold = false;
+        mdCode = false;
+        mdPendingStar = false;
+        mdAtLineStart = true;
+        mdHeadingHashes = 0;
+
+        startSpinner("思考中");
+        agentLoop.run(userMessage, this::handleEvent);
+        stopSpinner();
+    }
+
+    private void handleEvent(AgentEvent event) {
+        if (event instanceof AgentEvent.TextDelta td) {
+            if (spinnerRunning) {
+                stopSpinner();
+                System.out.println();
+            }
+            if (lastEventWasTool) {
+                System.out.println();
+            }
+            renderMarkdownChunk(td.text());
+            currentPreamble.append(td.text());
+            lastEventWasTool = false;
+        } else if (event instanceof AgentEvent.ToolCallStart tcs) {
+            stopSpinner();
+            lastEventWasTool = true;
+        } else if (event instanceof AgentEvent.ToolCallEnd tce) {
+            renderToolCallEnd(tce.result(), tce.toolName());
+            lastEventWasTool = true;
+        } else if (event instanceof AgentEvent.TokenUsage tu) {
+            totalInputTokens = tu.totalInput();
+            totalOutputTokens = tu.totalOutput();
+        } else if (event instanceof AgentEvent.IterationProgress ip) {
+            currentRound = ip.round();
+        } else if (event instanceof AgentEvent.RoundComplete rc) {
+            if (currentPreamble.length() > 0) {
+                currentPreamble.setLength(0);
+            }
+        } else if (event instanceof AgentEvent.Error err) {
+            stopSpinner();
+            System.err.println(red + "[错误] " + err.message() + reset);
+        } else if (event instanceof AgentEvent.AgentFinished af) {
+            // 关闭未闭合的 markdown 状态
+            if (mdBold) { System.out.print(boldOff); mdBold = false; }
+            if (mdCode) { System.out.print(reset); mdCode = false; }
+            double elapsed = (System.currentTimeMillis() - startTime) / 1000.0;
+            System.out.print(" " + dim + "(" + String.format("%.1f", elapsed) + "s" + reset);
+            if (af.totalInputTokens() > 0 || af.totalOutputTokens() > 0) {
+                System.out.print(dim + " · " + af.totalInputTokens() + "+"
+                        + af.totalOutputTokens() + " tokens" + reset);
+            }
+            System.out.println(")");
         }
     }
 
-    private boolean spinnerStopped;
+    // ========== Markdown 流式渲染 ==========
 
-    private void doStreamingChat(List<MessageRecord> history) {
-        List<JsonNode> toolList = tools.toToolsJson();
-        long startTime = System.currentTimeMillis();
-        spinnerStopped = false;
-        Thread spinner = startSpinner("思考中");
-        final boolean[] firstToken = {true};
-        StringBuilder fullResponse = new StringBuilder();
+    /** 逐字符处理 markdown，转换为 ANSI 转义序列后输出 */
+    private void renderMarkdownChunk(String chunk) {
+        for (int i = 0; i < chunk.length(); i++) {
+            char c = chunk.charAt(i);
 
-        provider.chatStream(history, toolList, new MarkdownRenderer(new StreamHandler() {
-            public void onToken(String token) {
-                if (firstToken[0]) { stopSpinner(spinner); firstToken[0] = false; }
-                System.out.print(token);
-                System.out.flush();
-                fullResponse.append(token);
+            // 行首 # 检测
+            if (mdAtLineStart && c == '#') {
+                mdHeadingHashes++;
+                continue;
             }
-            public void onToolCall(ToolCall call) {
-                stopSpinner(spinner);
-                firstToken[0] = false;
-                if (needFollowUp) {
-                    // 已在二次调用中又触发工具 → 跳过，避免无限递归
-                    return;
-                }
-                handleToolCall(call);
+            if (mdHeadingHashes > 0 && c == ' ') {
+                // 确认是标题，输出 bold 开始
+                System.out.print(bold);
+                mdBold = true;
+                mdHeadingHashes = 0;
+                mdAtLineStart = false;
+                continue;
             }
-            public void onUsage(int in, int out) {
-                // token 用量暂存（后续可展示）
+            if (mdHeadingHashes > 0 && c != '#' && c != ' ') {
+                // 不是标题，回退 # 号
+                for (int j = 0; j < mdHeadingHashes; j++) System.out.print('#');
+                mdHeadingHashes = 0;
             }
-            public void onComplete() {
-                if (!spinnerStopped && !needFollowUp) {
-                    stopSpinner(spinner);
-                }
-                double elapsed = (System.currentTimeMillis() - startTime) / 1000.0;
-                if (fullResponse.isEmpty() && needFollowUp) {
-                    // 工具调用流：不打印空计时
+
+            mdAtLineStart = false;
+
+            // ** 粗体
+            if (c == '*') {
+                if (mdPendingStar) {
+                    mdPendingStar = false;
+                    if (mdBold) {
+                        System.out.print(boldOff);
+                        mdBold = false;
+                    } else {
+                        System.out.print(bold);
+                        mdBold = true;
+                    }
                 } else {
-                    System.out.printf(" " + dim + "(%.1fs)" + reset + "%n", elapsed);
+                    mdPendingStar = true;
                 }
-                if (!fullResponse.isEmpty() && !needFollowUp) {
-                    conversation.addAssistantMessage(fullResponse.toString());
+                continue;
+            }
+            if (mdPendingStar) {
+                System.out.print('*');
+                mdPendingStar = false;
+            }
+
+            // ` 行内代码
+            if (c == '`') {
+                if (mdCode) {
+                    System.out.print(reset);
+                    mdCode = false;
+                } else {
+                    System.out.print(yellow);
+                    mdCode = true;
                 }
+                continue;
             }
-            public void onError(Exception e) {
-                stopSpinner(spinner);
-                System.err.println(red + "[错误] " + e.getMessage() + reset);
+
+            System.out.print(c);
+
+            if (c == '\n') {
+                mdAtLineStart = true;
+                mdHeadingHashes = 0;
             }
-        }));
+        }
+        System.out.flush();
     }
 
-    // ========== 工具执行 ==========
+    // ========== 工具执行状态美化 ==========
 
-    private void handleToolCall(ToolCall call) {
-        Tool tool = tools.get(call.name());
+    /** 工具执行进度指示：彩色图标 + 工具名 + 耗时 */
+    private void renderToolCallEnd(ToolResult result, String toolName) {
+        String catIcon = categoryIcon(toolName);
+        String catColor = categoryColor(toolName);
+        String status = result.success() ? green + "✓" : red + "✗";
+        String toolColor = result.success() ? catColor : red;
+        System.out.println("  " + status + " " + dim + catIcon + " " + reset
+                + toolColor + toolName + reset
+                + dim + "  " + result.durationMs() + "ms" + reset);
+    }
 
-        // 需要用户确认的工具
-        if (tool.requiresApproval()) {
-            System.out.println(yellow + "⚠ " + call.name() + " (读写操作)" + reset);
-            System.out.print(yellow + "   是否执行？[y/n] " + reset);
-            System.out.flush();
-            try {
-                int ch = System.in.read();
-                // 吞掉换行符
-                while (System.in.available() > 0) System.in.read();
-                if (ch != 'y' && ch != 'Y') {
-                    System.out.println(red + "   已取消" + reset);
-                    // 灌回拒绝信息
-                    conversation.addMessage(new MessageRecord(Role.ASSISTANT, "",
-                        List.of(new MessageBlock.ToolUseBlock(call.id(), call.name(), call.input()))));
-                    conversation.addMessage(new MessageRecord(Role.USER, "",
-                        List.of(new MessageBlock.ToolResultBlock(call.id(), "用户拒绝了工具调用", true))));
-                    needFollowUp = true;
-                    return;
-                }
-                System.out.println(green + "   已允许" + reset);
-            } catch (java.io.IOException e) {
-                System.out.println(red + "   读取输入失败，跳过" + reset);
-                return;
-            }
-        }
+    private String categoryIcon(String toolName) {
+        return switch (toolName) {
+            case "read_file", "write_file", "edit_file" -> "📄";
+            case "exec_command" -> "⚡";
+            case "find_files", "grep_code" -> "🔍";
+            default -> "•";
+        };
+    }
 
-        System.out.println(dim + "[工具] 开始执行..." + reset);
-        System.out.println();
-        System.out.print(yellow + "🔧 " + call.name() + reset + "  ");
-        System.out.flush();
-        Thread spin = startSpinner("执行中");
-
-        ToolResult result = tool.execute(call.input());
-
-        stopSpinner(spin);
-        String status = result.success() ? green + "✅" : red + "❌";
-        System.out.println(status + " " + call.name() + reset
-                + dim + " (" + result.durationMs() + "ms)" + reset);
-
-        // 结果折叠摘要
-        String preview = result.content();
-        if (preview.length() > 500) preview = preview.substring(0, 500) + "\n... (截断)";
-        if ("edit_file".equals(call.name()) || "grep_code".equals(call.name()) || "read_file".equals(call.name())) {
-            // 多行输出工具：保留换行，edit 高亮 diff
-            String colored = "edit_file".equals(call.name())
-                ? preview.replace("- ", red + "- " + dim).replace("+ ", green + "+ " + dim)
-                : preview;
-            System.out.println(dim + colored + reset);
-        } else {
-            System.out.println(dim + preview.replace("\n", "\\n") + reset);
-        }
-        System.out.println();
-
-        // 灌回对话历史
-        MessageRecord toolUseMsg = new MessageRecord(Role.ASSISTANT, "",
-                List.of(new MessageBlock.ToolUseBlock(call.id(), call.name(), call.input())));
-        MessageRecord toolResultMsg = new MessageRecord(Role.USER, "",
-                List.of(new MessageBlock.ToolResultBlock(call.id(), result.content(), !result.success())));
-        conversation.addMessage(toolUseMsg);
-        conversation.addMessage(toolResultMsg);
-
-        // 标记需要二次调用，不直接嵌套启动
-        needFollowUp = true;
+    private String categoryColor(String toolName) {
+        return switch (toolName) {
+            case "read_file", "find_files", "grep_code" -> blue;
+            case "write_file", "edit_file" -> yellow;
+            case "exec_command" -> magenta;
+            default -> reset;
+        };
     }
 
     // ========== 转圈动画 ==========
 
-    private Thread startSpinner(String label) {
-        System.out.print(dim + "⏳ " + label + "  " + reset);
+    private void startSpinner(String label) {
+        spinnerRunning = true;
+        System.out.print(dim + "  " + label + "  " + reset);
         System.out.flush();
         Thread t = new Thread(() -> {
             int i = 0;
             try {
-                while (!Thread.currentThread().isInterrupted()) {
-                    System.out.print("\r" + dim + "⏳ " + label + " " + SPINNER[i % SPINNER.length] + reset);
+                while (spinnerRunning && !Thread.currentThread().isInterrupted()) {
+                    String status = currentRound > 0
+                        ? "  第" + currentRound + "/10轮 " + label + " " + SPINNER[i % SPINNER.length]
+                        : "  " + label + " " + SPINNER[i % SPINNER.length];
+                    System.out.print("\r" + dim + status + reset);
                     System.out.flush();
                     i++;
                     Thread.sleep(120);
@@ -243,12 +307,17 @@ public final class Tui {
         });
         t.setDaemon(true);
         t.start();
-        return t;
+        this.spinnerThread = t;
     }
 
-    private void stopSpinner(Thread spinner) {
-        spinner.interrupt();
-        spinnerStopped = true;
+    private void stopSpinner() {
+        spinnerRunning = false;
+        if (spinnerThread != null) {
+            try {
+                spinnerThread.join(200);
+            } catch (InterruptedException ignored) {}
+            spinnerThread = null;
+        }
         System.out.print("\r\033[K");
         System.out.flush();
     }
