@@ -80,6 +80,7 @@ public final class GrepCodeTool implements Tool {
 
     @Override public Permission permission() { return Permission.READ_ONLY; }
     @Override public boolean requiresApproval() { return false; }
+    @Override public Category category() { return Category.SEARCH; }
     @Override public boolean isDestructive() { return false; }
     @Override public State defaultState() { return State.ENABLED; }
 }

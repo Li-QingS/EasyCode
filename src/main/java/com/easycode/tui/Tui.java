@@ -87,7 +87,10 @@ public final class Tui {
     private void printHelp() {
         System.out.println();
         System.out.println(bold + "命令：" + reset + "  /exit 退出  /help 帮助  Ctrl+D 退出");
-        System.out.println(bold + "工具：" + reset + "  " + String.join(" ", tools.toToolsJson().stream().map(n -> n.get("name").asText()).toList()));
+        System.out.println(bold + "工具：" + reset);
+        for (var entry : tools.byCategory().entrySet()) {
+            System.out.println("  " + entry.getKey().name().toLowerCase() + ": " + String.join(", ", entry.getValue()));
+        }
         System.out.println();
     }
 
@@ -98,9 +101,9 @@ public final class Tui {
     private void startStreamingChat() {
         needFollowUp = false;
         doStreamingChat(conversation.getHistory());
-        if (needFollowUp) {
+        for (int round = 0; round < 3 && needFollowUp; round++) {
             needFollowUp = false;
-            System.out.println(dim + "[二次请求] 发起第二次 chatStream..." + reset);
+            System.out.println(dim + "[第" + (round+2) + "轮] 继续..." + reset);
             doStreamingChat(conversation.getHistory());
         }
     }
@@ -160,10 +163,12 @@ public final class Tui {
     private void handleToolCall(ToolCall call) {
         Tool tool = tools.get(call.name());
 
+        // 分隔线
+        System.out.println(dim + "─".repeat(40) + reset);
+
         // 需要用户确认的工具
         if (tool.requiresApproval()) {
-            System.out.println(yellow + "⚠ " + call.name() + " (读写操作)" + reset);
-            System.out.print(yellow + "   是否执行？[y/n] " + reset);
+            System.out.print(yellow + "  ⚠ " + call.name() + "  执行？[y/n] " + reset);
             System.out.flush();
             try {
                 int ch = System.in.read();
@@ -186,9 +191,7 @@ public final class Tui {
             }
         }
 
-        System.out.println(dim + "[工具] 开始执行..." + reset);
-        System.out.println();
-        System.out.print(yellow + "🔧 " + call.name() + reset + "  ");
+        System.out.print(bold + "  " + call.name() + reset + "  ");
         System.out.flush();
         Thread spin = startSpinner("执行中");
 

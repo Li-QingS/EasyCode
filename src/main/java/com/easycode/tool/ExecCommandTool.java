@@ -42,11 +42,11 @@ public final class ExecCommandTool implements Tool {
 
     @Override public String name() { return "exec_command"; }
     @Override public String description() {
-        return "在项目根目录执行 shell 命令。参数 command: 通过 bash -c 执行。" +
-            "常用: mvn compile 编译项目、mvn test 运行测试、mvn test -Dtest=XxxTest 运行单个测试、" +
-            "ls -R 查看项目结构、tree 看目录树、java 运行代码。" +
-            "编译/测试失败时退出码非0，结果末尾[退出码: N]，stderr 含具体错误信息，模型可直接根据错误定位修复。" +
-            "退出码语义: grep/diff/find 等查询命令退出码 1 不算错误(表示无匹配/有差异)，其他命令非零退出码为错误。超时直接报 error。";
+        return "在项目根目录执行 shell 命令并返回标准输出、标准错误和退出码。\n" +
+            "参数 command(必填): 通过 bash -c 执行的命令字符串。\n" +
+            "常用场景: mvn compile 编译、mvn test 运行测试、ls 列出目录内容、tree 看目录树、java 运行代码。\n" +
+            "退出码语义: grep/diff/find 的退出码1不算错误(无匹配/有差异), 其他命令非零为错误。超时直接报error。\n" +
+            "列出目录内容用此工具。搜索特定文件用 find_files, 搜索代码内容用 grep_code, 读取文件用 read_file。";
     }
 
     @Override
@@ -117,6 +117,7 @@ public final class ExecCommandTool implements Tool {
 
     // 元信息
     @Override public Permission permission() { return Permission.READ_WRITE; }
+    @Override public Category category() { return Category.SHELL; }
     @Override public boolean isDestructive() { return true; }
     @Override public boolean requiresApproval() { return true; }
     @Override public State defaultState() { return State.APPROVAL_REQUIRED; }

@@ -107,6 +107,7 @@ public final class ReadFileTool implements Tool {
 
     @Override public Permission permission() { return Permission.READ_ONLY; }
     @Override public boolean requiresApproval() { return false; }
+    @Override public Category category() { return Category.FILE; }
     @Override public boolean isDestructive() { return false; }
     @Override public State defaultState() { return State.ENABLED; }
 }
