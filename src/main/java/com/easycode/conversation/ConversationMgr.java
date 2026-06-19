@@ -1,6 +1,7 @@
 package com.easycode.conversation;
 
 import com.easycode.provider.ToolCall;
+import com.easycode.context.ReplacementLedger;
 import com.fasterxml.jackson.databind.JsonNode;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -55,6 +56,47 @@ public final class ConversationMgr {
         this.systemPrompt = prompt;
     }
 
+    /** 替换指定位置的消息 */
+    public void replaceMessage(int index, MessageRecord msg) {
+        if (index >= 0 && index < history.size()) {
+            history.set(index, msg);
+        }
+    }
+
+    /** 替换全部历史 */
+    public void replaceAll(List<MessageRecord> newHistory) {
+        history.clear();
+        history.addAll(newHistory);
+    }
+
+    /** 结合 ReplacementLedger 组装消息列表：用冻结的替换字符串替换已决策的 toolResult（F5d） */
+    public List<MessageRecord> assembleMessages(ReplacementLedger ledger) {
+        List<MessageRecord> result = new ArrayList<>();
+        for (MessageRecord msg : getHistory()) {
+            List<MessageBlock> newBlocks = new ArrayList<>();
+            boolean changed = false;
+            for (MessageBlock b : msg.blocks()) {
+                if (b instanceof MessageBlock.ToolResultBlock tr) {
+                    String replacement = ledger.getReplacement(tr.toolUseId());
+                    if (replacement != null) {
+                        newBlocks.add(new MessageBlock.ToolResultBlock(tr.toolUseId(), replacement, tr.isError()));
+                        changed = true;
+                    } else {
+                        newBlocks.add(b);
+                    }
+                } else {
+                    newBlocks.add(b);
+                }
+            }
+            if (changed) {
+                result.add(new MessageRecord(msg.role(), msg.content(), newBlocks));
+            } else {
+                result.add(msg);
+            }
+        }
+        return result;
+    }
+
     /** Token 数估算：总字符数 / 3 */
     public int estimateTokens() {
         long totalChars = 0;
@@ -72,11 +114,9 @@ public final class ConversationMgr {
     public void trimToWindow(int maxTokens) {
         if (history.isEmpty()) return;
         while (estimateTokens() > maxTokens && history.size() > 2) {
-            // 保留 index 0（system prompt）和最后一个 user 消息
             int lastUser = history.size() - 1;
             while (lastUser > 0 && history.get(lastUser).role() != Role.USER) lastUser--;
             if (lastUser <= 0) break;
-            // 从 index 1 开始删（保留 system），但不删 lastUser
             for (int i = 1; i < history.size(); i++) {
                 if (i != lastUser) {
                     history.remove(i);

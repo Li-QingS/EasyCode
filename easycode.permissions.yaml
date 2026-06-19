@@ -2,3 +2,33 @@ rules:
   - Edit(docs/1.txt)
 
   - Bash(cd "/mnt/d/agent project/EasyCode" && find . -iname "*hello*" -not -path './.git/*' -not -path './target/*' 2>/dev/null)
+
+  - Bash(ls /mnt/d/agent\ project/EasyCode/src/main/java/com/easycode/)
+
+  - Bash(find . -type f \( -name "*.java" -o -name "*.yaml" -o -name "*.xml" -o -name "*.md" -o -name "*.txt" \) | head -100)
+
+  - Bash(find src -type f -name "*.java" | sort)
+
+  - Bash(find src -type f -name "*.java" | sort)
+
+  - Bash(ls -la docs/)
+
+  - Bash(find src -type f -name "*.java" | wc -l)
+
+  - Bash(find src/main -type d | sort)
+
+  - Bash(find src/test -type f -name "*.java" | sort)
+
+  - Bash(find src/main -type f -name "*.java" | sort)
+
+  - Bash(find src/test -type f -name "*.java" | sort)
+
+  - Bash(find src/main -type f -name "*.java" -printf '%P\n' | sort | column)
+
+  - Bash(ls -R src/main/java/com/easycode/ --format=single-column)
+
+  - Bash(ls -R src/main/java/com/easycode/permission/ src/main/java/com/easycode/prompt/ src/main/java/com/easycode/provider/ src/main/java/com/easycode/tool/ src/main/java/com/easycode/tui/ --format=single-column)
+
+  - Bash(ls -R src/test/java/com/easycode/ --format=single-column)
+
+  - Bash(ls -la *.yaml *.md *.txt pom.xml 2>/dev/null)

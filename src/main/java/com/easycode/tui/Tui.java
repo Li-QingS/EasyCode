@@ -3,6 +3,7 @@ package com.easycode.tui;
 import com.easycode.agent.AgentEvent;
 import com.easycode.agent.AgentLoop;
 import com.easycode.config.Config;
+import com.easycode.context.CompressEvent;
 import com.easycode.conversation.ConversationMgr;
 import com.easycode.permission.PermissionMode;
 import com.easycode.permission.PermissionPipeline;
@@ -11,9 +12,6 @@ import com.easycode.tool.ToolResult;
 import org.jline.reader.LineReader;
 import org.jline.reader.LineReaderBuilder;
 import org.jline.reader.UserInterruptException;
-import org.jline.reader.Completer;
-import org.jline.reader.Candidate;
-import org.jline.reader.CompletingParsedLine;
 import org.jline.reader.EndOfFileException;
 import org.jline.terminal.Terminal;
 import org.jline.terminal.TerminalBuilder;
@@ -30,6 +28,7 @@ public final class Tui {
     private final ConversationMgr conversation; private final Config config;
     private PermissionPipeline permPipeline; private PermissionMode permMode=PermissionMode.DEFAULT;
     private int totalInputTokens,totalOutputTokens,currentRound;
+    private int lastRoundInputTokens,lastRoundOutputTokens;
     private volatile boolean spinnerRunning; private Thread spinnerThread;
     private long startTime; private boolean lastEventWasTool,mdBold,mdCode,mdPendingStar,mdAtLineStart=true;
     private int mdHeadingHashes; private StringBuilder currentPreamble;
@@ -53,6 +52,13 @@ public final class Tui {
             if("/exit".equals(line))break;
             if("/help".equals(line)){printHelp();continue;}
             if("/perm".equals(line)){showPermMenu();continue;}
+            if("/compact".equals(line)){
+                System.out.print(dim+"  正在压缩上下文..."+reset); System.out.flush();
+                CompressEvent evt = agentLoop.forceCompact(tools.toToolsJson());
+                System.out.print("\r\033[K");
+                System.out.println((evt.success()?green:red)+bold+"  ◈ "+evt.toDisplay()+reset);
+                continue;
+            }
             conversation.addUserMessage(line); conversation.trimToWindow(config.contextWindow()); startStreamingChat(line);
         }
         terminal.close();
@@ -107,17 +113,20 @@ public final class Tui {
         System.out.println(C+"  ║"+W+"     "+D+"Java 17 · JLine · Anthropic / OpenAI"+W+"       "+C+"║"+W);
         System.out.println(C+"  ║"+W+"                                          "+C+"║"+W);
         System.out.println(C+"  ╟"+W+D+"──────────────────────────────────────────"+W+C+"╢"+W);
-        System.out.println(C+"  ║"+W+"  "+G+"/perm"+W+D+"  权限模式"+W+"  │  "+G+"/help"+W+D+"  帮助"+W+"  │  "+G+"/exit"+W+D+"  退出"+W+"  "+C+"║"+W);
+        System.out.println(C+"  ║"+W+"  "+G+"/perm"+W+D+"  权限模式"+W+"  │  "+G+"/compact"+W+D+" 压缩"+W+"  │  "+G+"/help"+W+D+"  帮助"+W+"  │  "+G+"/exit"+W+D+"  退出"+W+"  "+C+"║"+W);
         System.out.println(C+"  ║"+W+"  "+D+"直接输入问题开始对话"+W+"                          "+C+"║"+W);
         System.out.println(C+"  ╚══════════════════════════════════════════╝"+W);
         System.out.println();
-    }    private void printHelp() {
+    }
+
+    private void printHelp() {
         String B="\033[1;36m",G="\033[32m",W="\033[0m",D="\033[2m";
         System.out.println();
         System.out.println(B+"  ╭─ 帮助 ─────────────────────────────────────"+W);
         System.out.println(B+"  │"+W);
         System.out.println(B+"  │"+W+bold+"  ⌨  命令"+W);
         System.out.println(B+"  │"+W+"    "+G+"/perm"+W+"       查看权限模式列表并切换");
+        System.out.println(B+"  │"+W+"    "+G+"/compact"+W+"    手动压缩上下文");
         System.out.println(B+"  │"+W+"    "+G+"/help"+W+"       显示本帮助");
         System.out.println(B+"  │"+W+"    "+G+"/exit"+W+"       退出程序");
         System.out.println(B+"  │"+W+"    "+G+"Ctrl+C"+W+"      取消当前正在执行的请求");
@@ -150,12 +159,38 @@ public final class Tui {
         if(e instanceof AgentEvent.TextDelta td){if(spinnerRunning){stopSpinner();System.out.println();}if(lastEventWasTool)System.out.println();renderMarkdown(td.text());currentPreamble.append(td.text());lastEventWasTool=false;}
         else if(e instanceof AgentEvent.ToolCallStart tcs){stopSpinner();lastEventWasTool=true;}
         else if(e instanceof AgentEvent.ToolCallEnd tce){renderToolCall(tce.result(),tce.toolName());lastEventWasTool=true;}
-        else if(e instanceof AgentEvent.TokenUsage tu){totalInputTokens=tu.totalInput();totalOutputTokens=tu.totalOutput();}
+        else if(e instanceof AgentEvent.TokenUsage tu){
+            totalInputTokens=tu.totalInput();totalOutputTokens=tu.totalOutput();
+            lastRoundInputTokens=tu.roundInput();lastRoundOutputTokens=tu.roundOutput();
+        }
         else if(e instanceof AgentEvent.IterationProgress ip){currentRound=ip.round();}
         else if(e instanceof AgentEvent.RoundComplete rc){if(currentPreamble.length()>0)currentPreamble.setLength(0);}
         else if(e instanceof AgentEvent.Error err){stopSpinner();System.err.println(red+"[错误] "+err.message()+reset);}
         else if(e instanceof AgentEvent.PermissionAsk ask){handlePermissionAsk(ask);}
-        else if(e instanceof AgentEvent.AgentFinished af){if(mdBold){System.out.print(boldOff);mdBold=false;}if(mdCode){System.out.print(reset);mdCode=false;}double el=(System.currentTimeMillis()-startTime)/1000.0;System.out.print(" "+dim+"("+String.format("%.1f",el)+"s"+reset);if(af.totalInputTokens()>0||af.totalOutputTokens()>0)System.out.print(dim+" · "+af.totalInputTokens()+"+"+af.totalOutputTokens()+" tokens"+reset);System.out.println(")");}
+        else if(e instanceof AgentEvent.ContextCompress cc){
+            stopSpinner();
+            var evt = cc.event();
+            String label = switch(evt.reason()){
+                case AUTO -> "自动压缩";
+                case MANUAL -> "手动压缩";
+                case EMERGENCY -> "紧急压缩";
+            };
+            System.out.println((evt.success()?green:red)+bold+"  ◈ "+label+": "+evt.toDisplay()+reset);
+        }
+        else if(e instanceof AgentEvent.AgentFinished af){
+            if(mdBold){System.out.print(boldOff);mdBold=false;}
+            if(mdCode){System.out.print(reset);mdCode=false;}
+            double el=(System.currentTimeMillis()-startTime)/1000.0;
+            System.out.print(" "+dim+"("+String.format("%.1f",el)+"s"+reset);
+            if(lastRoundInputTokens>0||lastRoundOutputTokens>0)
+                System.out.print(dim+" · 本轮入:"+lastRoundInputTokens+" 出:"+lastRoundOutputTokens+reset);
+            if(af.totalInputTokens()>0||af.totalOutputTokens()>0)
+                System.out.print(dim+" · 累计入:"+af.totalInputTokens()+" 出:"+af.totalOutputTokens()+reset);
+            int ctxEst = conversation.estimateTokens();
+            int ctxWin = config.contextWindow();
+            System.out.print(dim+" · 上下文:"+ctxEst+"/"+ctxWin+reset);
+            System.out.println(")");
+        }
     }
 
     private void handlePermissionAsk(AgentEvent.PermissionAsk ask){
@@ -166,7 +201,6 @@ public final class Tui {
         System.out.println(dim+"  \u2502 原因: "+reset+ask.reason());
         System.out.println(dim+"  \u2570\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500"+reset);
         try{while(true){
-            // Print all 3 options on separate lines + help line, then go back 4 lines
             for(int i=0;i<opts.length;i++){
                 System.out.print("\r\033[K  "+(i==sel?bold+"\u25b6 "+opts[i]+reset:dim+"  "+opts[i]+reset)+"\n");
             }
@@ -177,11 +211,10 @@ public final class Tui {
             if(ch=='\n'||ch=='\r')break;
             else if(ch=='1'){sel=0;break;}else if(ch=='2'){sel=1;break;}else if(ch=='3'){sel=2;break;}
             else if(ch==27){if(System.in.available()>0){int c2=System.in.read();if(c2==91){int c3=System.in.read();if(c3==65)sel=(sel+2)%3;else if(c3==66)sel=(sel+1)%3;}}else{sel=2;break;}}
-            // Move up 4 lines for next redraw
             System.out.print("\033[4A"); System.out.flush();
         }
         while(System.in.available()>0)System.in.read();
-        System.out.print("\033[1A\r\033[K"); // clear last help line
+        System.out.print("\033[1A\r\033[K");
         ask.future().complete(switch(sel){case 0->"allow";case 1->"permanent";default->"deny";});
         }catch(Exception ex){ask.future().complete("deny");}}
 

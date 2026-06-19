@@ -14,7 +14,8 @@ public final class Config {
     @JsonProperty("api_key")
     private String apiKey;
 
-    private int contextWindow = 128_000;
+    private Integer contextWindow;
+    @com.fasterxml.jackson.annotation.JsonProperty("context_window")
     private int toolTimeout = 30;
     @JsonProperty("mcp_servers")
     private Map<String, com.easycode.mcp.McpServerConfig> mcpServers = Map.of();
@@ -43,7 +44,12 @@ public final class Config {
     public void setBaseUrl(String baseUrl) { this.baseUrl = baseUrl; }
     public String apiKey() { return apiKey; }
     public void setApiKey(String apiKey) { this.apiKey = apiKey; }
-    public int contextWindow() { return contextWindow; }
+    public int contextWindow() {
+        if (contextWindow != null) return contextWindow;
+        if ("anthropic".equals(protocol)) return 200_000;
+        if ("openai".equals(protocol)) return 128_000;
+        return 128_000;
+    }
     public void setContextWindow(int contextWindow) { this.contextWindow = contextWindow; }
     public int toolTimeout() { return toolTimeout; }
     public void setToolTimeout(int toolTimeout) { this.toolTimeout = toolTimeout; }

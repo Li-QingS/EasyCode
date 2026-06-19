@@ -1,6 +1,7 @@
 package com.easycode.agent;
 
 import com.easycode.tool.ToolResult;
+import com.easycode.context.CompressEvent;
 import java.util.concurrent.CompletableFuture;
 
 public sealed interface AgentEvent {
@@ -13,4 +14,5 @@ public sealed interface AgentEvent {
     record Error(String message, boolean fatal) implements AgentEvent {}
     record PermissionAsk(String toolId, String toolName, String preview, String reason, CompletableFuture<String> future) implements AgentEvent {}
     record AgentFinished(String finalText, int totalRounds, int totalInputTokens, int totalOutputTokens) implements AgentEvent {}
+    record ContextCompress(CompressEvent event) implements AgentEvent {}
 }
