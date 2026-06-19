@@ -24,6 +24,8 @@ public final class ModeDeductionLayer implements PermissionLayer {
     }
 
     private int categoryIndex(Tool tool) {
+        if (tool.permission() == Tool.Permission.READ_ONLY) return 0;
+        // 文件名匹配仅用于区分文件写和命令执行
         String name = tool.name();
         if ("read_file".equals(name) || "find_files".equals(name) || "grep_code".equals(name)) return 0;
         if ("write_file".equals(name) || "edit_file".equals(name)) return 1;

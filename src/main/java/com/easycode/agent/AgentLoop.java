@@ -5,6 +5,10 @@ import com.easycode.conversation.ConversationMgr;
 import com.easycode.conversation.MessageBlock;
 import com.easycode.conversation.MessageRecord;
 import com.easycode.conversation.Role;
+import com.easycode.permission.PermissionConfig;
+import com.easycode.permission.PermissionContext;
+import com.easycode.permission.PermissionMode;
+import com.easycode.permission.PermissionPipeline;
 import com.easycode.prompt.Environment;
 import com.easycode.prompt.Prompt;
 import com.easycode.prompt.Reminder;
@@ -17,8 +21,10 @@ import com.easycode.tool.Tool;
 import com.easycode.tool.ToolRegistry;
 import com.easycode.tool.ToolResult;
 import com.fasterxml.jackson.databind.JsonNode;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.CompletableFuture;
 import java.util.function.Consumer;
 
 public final class AgentLoop {
@@ -35,6 +41,7 @@ public final class AgentLoop {
 
     private volatile boolean cancelled;
     private boolean planMode;
+    private PermissionMode permMode = PermissionMode.DEFAULT;
     private int totalInputTokens;
     private int totalOutputTokens;
     private int emptyTextRetries;
@@ -57,12 +64,13 @@ public final class AgentLoop {
 
         Environment env = Environment.collect(appVersion, config.model());
         String stablePrompt = Prompt.buildStable();
+        PermissionPipeline pipeline = new PermissionPipeline(PermissionConfig.load(Path.of("").toAbsolutePath()));
+        if (permMode == PermissionMode.DEFAULT) permMode = pipeline.startMode();
 
         for (int round = 1; round <= MAX_ITERATIONS; round++) {
             if (cancelled) {
                 eventSink.accept(new AgentEvent.Error("已取消", false));
-                eventSink.accept(new AgentEvent.AgentFinished(null, round - 1,
-                        totalInputTokens, totalOutputTokens));
+                eventSink.accept(new AgentEvent.AgentFinished(null, round - 1, totalInputTokens, totalOutputTokens));
                 return null;
             }
 
@@ -85,15 +93,13 @@ public final class AgentLoop {
                 provider.chatStream(req, collector);
             } catch (Exception e) {
                 eventSink.accept(new AgentEvent.Error("Provider 流出错: " + e.getMessage(), false));
-                eventSink.accept(new AgentEvent.AgentFinished(null, round,
-                        totalInputTokens, totalOutputTokens));
+                eventSink.accept(new AgentEvent.AgentFinished(null, round, totalInputTokens, totalOutputTokens));
                 return null;
             }
 
             if (collector.hasError()) {
                 eventSink.accept(new AgentEvent.Error(collector.getErrorMessage(), false));
-                eventSink.accept(new AgentEvent.AgentFinished(null, round,
-                        totalInputTokens, totalOutputTokens));
+                eventSink.accept(new AgentEvent.AgentFinished(null, round, totalInputTokens, totalOutputTokens));
                 return null;
             }
 
@@ -101,8 +107,8 @@ public final class AgentLoop {
             int roundOut = collector.getRoundOutputTokens();
             totalInputTokens += roundIn;
             totalOutputTokens += roundOut;
-            eventSink.accept(new AgentEvent.TokenUsage(roundIn, roundOut,
-                    totalInputTokens, totalOutputTokens, 0, 0));
+            eventSink.accept(new AgentEvent.TokenUsage(roundIn, roundOut, totalInputTokens, totalOutputTokens,
+                    collector.getCacheWriteTokens(), collector.getCacheReadTokens()));
 
             List<ToolCall> toolCalls = collector.getToolCalls();
             String finalText = collector.getFullText();
@@ -110,8 +116,7 @@ public final class AgentLoop {
             if (toolCalls.isEmpty() && !finalText.isBlank()) {
                 emptyTextRetries = 0;
                 conversation.addAssistantMessage(finalText);
-                eventSink.accept(new AgentEvent.AgentFinished(finalText, round,
-                        totalInputTokens, totalOutputTokens));
+                eventSink.accept(new AgentEvent.AgentFinished(finalText, round, totalInputTokens, totalOutputTokens));
                 return finalText;
             }
 
@@ -119,18 +124,15 @@ public final class AgentLoop {
             if (toolCalls.isEmpty() && !thinkingText.isBlank()) {
                 emptyTextRetries = 0;
                 conversation.addAssistantMessage(thinkingText);
-                eventSink.accept(new AgentEvent.AgentFinished(thinkingText, round,
-                        totalInputTokens, totalOutputTokens));
+                eventSink.accept(new AgentEvent.AgentFinished(thinkingText, round, totalInputTokens, totalOutputTokens));
                 return thinkingText;
             }
 
             if (toolCalls.isEmpty()) {
                 emptyTextRetries++;
                 if (emptyTextRetries > MAX_EMPTY_TEXT_RETRIES) {
-                    eventSink.accept(new AgentEvent.Error(
-                            "模型连续 " + MAX_EMPTY_TEXT_RETRIES + " 次返回空文本，已停止", false));
-                    eventSink.accept(new AgentEvent.AgentFinished(null, round,
-                            totalInputTokens, totalOutputTokens));
+                    eventSink.accept(new AgentEvent.Error("模型连续 " + MAX_EMPTY_TEXT_RETRIES + " 次返回空文本，已停止", false));
+                    eventSink.accept(new AgentEvent.AgentFinished(null, round, totalInputTokens, totalOutputTokens));
                     return null;
                 }
                 conversation.addUserMessage("请给出文字回复，总结你的发现。");
@@ -141,51 +143,64 @@ public final class AgentLoop {
 
             boolean allUnknown = true;
             for (ToolCall tc : toolCalls) {
-                try {
-                    tools.get(tc.name());
-                    allUnknown = false;
-                } catch (IllegalArgumentException e) {}
+                try { tools.get(tc.name()); allUnknown = false; }
+                catch (IllegalArgumentException e) {}
             }
 
             if (allUnknown) {
                 consecutiveUnknownTools++;
                 if (consecutiveUnknownTools >= MAX_CONSECUTIVE_UNKNOWN) {
-                    eventSink.accept(new AgentEvent.Error(
-                            "连续 " + MAX_CONSECUTIVE_UNKNOWN + " 轮请求未知工具，已停止", false));
-                    List<MessageBlock> unknownUseBlocks = new ArrayList<>();
-                    List<MessageBlock> unknownResultBlocks = new ArrayList<>();
+                    eventSink.accept(new AgentEvent.Error("连续 " + MAX_CONSECUTIVE_UNKNOWN + " 轮请求未知工具，已停止", false));
+                    List<MessageBlock> ub = new ArrayList<>();
+                    List<MessageBlock> rb = new ArrayList<>();
                     for (ToolCall tc : toolCalls) {
-                        unknownUseBlocks.add(new MessageBlock.ToolUseBlock(tc.id(), tc.name(), tc.input()));
-                        unknownResultBlocks.add(new MessageBlock.ToolResultBlock(tc.id(), "未知工具: " + tc.name(), true));
+                        ub.add(new MessageBlock.ToolUseBlock(tc.id(), tc.name(), tc.input()));
+                        rb.add(new MessageBlock.ToolResultBlock(tc.id(), "未知工具: " + tc.name(), true));
                     }
-                    conversation.addMessage(new MessageRecord(Role.ASSISTANT, "", unknownUseBlocks));
-                    conversation.addMessage(new MessageRecord(Role.USER, "", unknownResultBlocks));
-                    eventSink.accept(new AgentEvent.AgentFinished(null, round,
-                            totalInputTokens, totalOutputTokens));
+                    conversation.addMessage(new MessageRecord(Role.ASSISTANT, "", ub));
+                    conversation.addMessage(new MessageRecord(Role.USER, "", rb));
+                    eventSink.accept(new AgentEvent.AgentFinished(null, round, totalInputTokens, totalOutputTokens));
                     return null;
                 }
-            } else {
-                consecutiveUnknownTools = 0;
-            }
+            } else { consecutiveUnknownTools = 0; }
 
             for (int i = 0; i < toolCalls.size(); i++) {
-                ToolCall tc = toolCalls.get(i);
-                eventSink.accept(new AgentEvent.ToolCallStart(i, tc.id(), tc.name()));
+                eventSink.accept(new AgentEvent.ToolCallStart(i, toolCalls.get(i).id(), toolCalls.get(i).name()));
             }
 
-            List<ToolResult> results = ToolExecutor.executeAll(toolCalls, tools, eventSink);
+            PermissionMode mode = planMode ? PermissionMode.PLAN : permMode;
+            PermissionContext permCtx = new PermissionContext(mode, PermissionConfig.load(Path.of("").toAbsolutePath()), Path.of("").toAbsolutePath());
+            List<ToolResult> results = ToolExecutor.executeAll(toolCalls, tools, eventSink, pipeline, permCtx);
+
+            // === ASK_PENDING 处理：扫描结果，弹确认窗口，等待用户决策 ===
+            for (int i = 0; i < results.size(); i++) {
+                ToolResult r = results.get(i);
+                if (!r.askPending()) continue;
+                ToolCall tc = toolCalls.get(i);
+                Tool tool = tools.get(tc.name());
+                CompletableFuture<String> future = new CompletableFuture<>();
+                eventSink.accept(new AgentEvent.PermissionAsk(tc.id(), tc.name(),
+                        extractPreview(tc), "当前权限模式要求确认此操作", future));
+                try {
+                    String choice = future.get(100, java.util.concurrent.TimeUnit.MILLISECONDS);
+                    if ("allow".equals(choice) || "permanent".equals(choice)) {
+                        if ("permanent".equals(choice)) writePermanentRule(tc);
+                        results.set(i, tool.execute(tc.input()));
+                        eventSink.accept(new AgentEvent.ToolCallEnd(i, tc.id(), tc.name(), results.get(i)));
+                    }
+                } catch (Exception e) {
+                    results.set(i, ToolResult.err(tc.name(), "确认取消", 0));
+                }
+            }
 
             List<MessageBlock> toolUseBlocks = new ArrayList<>();
-            for (ToolCall tc : toolCalls) {
-                toolUseBlocks.add(new MessageBlock.ToolUseBlock(tc.id(), tc.name(), tc.input()));
-            }
+            for (ToolCall tc : toolCalls) toolUseBlocks.add(new MessageBlock.ToolUseBlock(tc.id(), tc.name(), tc.input()));
             conversation.addMessage(new MessageRecord(Role.ASSISTANT, "", toolUseBlocks));
 
             List<MessageBlock> toolResultBlocks = new ArrayList<>();
             for (int i = 0; i < toolCalls.size(); i++) {
-                ToolCall tc = toolCalls.get(i);
                 ToolResult result = results.get(i);
-                toolResultBlocks.add(new MessageBlock.ToolResultBlock(tc.id(), result.content(), !result.success()));
+                toolResultBlocks.add(new MessageBlock.ToolResultBlock(toolCalls.get(i).id(), result.content(), !result.success()));
             }
             conversation.addMessage(new MessageRecord(Role.USER, "", toolResultBlocks));
 
@@ -193,12 +208,39 @@ public final class AgentLoop {
         }
 
         eventSink.accept(new AgentEvent.Error("达到迭代上限 (" + MAX_ITERATIONS + " 轮)", false));
-        eventSink.accept(new AgentEvent.AgentFinished(null, MAX_ITERATIONS,
-                totalInputTokens, totalOutputTokens));
+        eventSink.accept(new AgentEvent.AgentFinished(null, MAX_ITERATIONS, totalInputTokens, totalOutputTokens));
         return null;
     }
 
     public void cancel() { cancelled = true; }
     public void setPlanMode(boolean planMode) { this.planMode = planMode; }
     public boolean isPlanMode() { return planMode; }
+    public void setPermMode(PermissionMode m) { this.permMode = m; }
+    public PermissionMode getPermMode() { return permMode; }
+
+    private String extractPreview(ToolCall tc) {
+        if (tc.input().has("command")) return tc.input().get("command").asText();
+        if (tc.input().has("path")) return tc.input().get("path").asText();
+        if (tc.input().has("pattern")) return tc.input().get("pattern").asText();
+        return tc.input().toString();
+    }
+
+    private void writePermanentRule(ToolCall tc) {
+        try {
+            String friendlyName = switch (tc.name()) {
+                case "read_file" -> "Read"; case "write_file" -> "Write";
+                case "edit_file" -> "Edit"; case "exec_command" -> "Bash";
+                case "find_files" -> "Glob"; case "grep_code" -> "Grep";
+                default -> tc.name();
+            };
+            String param = "";
+            if (tc.input().has("command")) param = tc.input().get("command").asText();
+            else if (tc.input().has("path")) param = tc.input().get("path").asText();
+            String rule = param.isEmpty() ? friendlyName : friendlyName + "(" + param + ")";
+            Path configPath = Path.of("easycode.permissions.yaml");
+            String content = java.nio.file.Files.exists(configPath)
+                ? java.nio.file.Files.readString(configPath) + "\n" : "rules:\n";
+            java.nio.file.Files.writeString(configPath, content + "  - " + rule + "\n");
+        } catch (Exception ignored) {}
+    }
 }

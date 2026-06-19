@@ -17,7 +17,8 @@ public final class PermissionConfig {
         String defaultMode = null;
 
         // 用户级 ~/.easycode/permissions.yaml
-        Path userPath = Path.of(System.getProperty("user.home"), ".easycode", "permissions.yaml");
+        String home = System.getProperty("user.home");
+        Path userPath = (home != null) ? Path.of(home, ".easycode", "permissions.yaml") : Path.of("/tmp/.easycode/permissions.yaml");
         String[] userDM = new String[1];
         loadFile(userPath, rules, userDM);
         if (userDM[0] != null) defaultMode = userDM[0];

@@ -1,5 +1,6 @@
 package com.easycode.config;
 
+import java.util.Map;
 import com.fasterxml.jackson.annotation.JsonProperty;
 
 /** LLM 配置 */
@@ -15,7 +16,9 @@ public final class Config {
 
     private int contextWindow = 128_000;
     private int toolTimeout = 30;
-    @JsonProperty("system_prompt")
+    @JsonProperty("mcp_servers")
+    private Map<String, com.easycode.mcp.McpServerConfig> mcpServers = Map.of();
+    public Map<String, com.easycode.mcp.McpServerConfig> mcpServers() { return mcpServers; }
     private String systemPrompt = "你是 EasyCode，一个终端 AI 编程助手。用工具操作文件系统。优先凭自身知识回答；需要准确文件内容、项目结构、或代码细节时再使用工具，拿到结果后给出文字回复。路径统一用正斜杠 /。用户要求模糊时反问确认。工具结果截断时用 offset 继续读。注意：每次回答必须以文字形式给出结论，不允许只调工具不说话。";
 
     public Config() {}

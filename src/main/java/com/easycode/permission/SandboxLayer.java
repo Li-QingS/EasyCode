@@ -4,6 +4,7 @@ import com.easycode.provider.ToolCall;
 import com.easycode.tool.Tool;
 import java.io.IOException;
 import java.nio.file.Files;
+import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.util.Set;
 
@@ -20,14 +21,14 @@ public final class SandboxLayer implements PermissionLayer {
         if (pathStr == null || pathStr.isEmpty()) return PermissionResult.NOT_APPLICABLE;
         try {
             Path target = Path.of(pathStr);
-            Path projectRoot = ctx.projectRoot().toRealPath();
+            Path projectRoot = ctx.projectRoot().toRealPath(LinkOption.NOFOLLOW_LINKS);
 
             if (!target.isAbsolute()) {
                 target = ctx.projectRoot().resolve(target);
             }
 
             if (Files.exists(target)) {
-                Path realTarget = target.toRealPath();
+                Path realTarget = target.toRealPath(LinkOption.NOFOLLOW_LINKS);
                 if (!realTarget.startsWith(projectRoot))
                     return PermissionResult.DENY;
             } else {
@@ -37,7 +38,7 @@ public final class SandboxLayer implements PermissionLayer {
                     ancestor = ancestor.getParent();
                 }
                 if (ancestor != null) {
-                    Path realAncestor = ancestor.toRealPath();
+                    Path realAncestor = ancestor.toRealPath(LinkOption.NOFOLLOW_LINKS);
                     if (!realAncestor.startsWith(projectRoot))
                         return PermissionResult.DENY;
                 }

@@ -1,0 +1,4 @@
+rules:
+  - Edit(docs/1.txt)
+
+  - Bash(cd "/mnt/d/agent project/EasyCode" && find . -iname "*hello*" -not -path './.git/*' -not -path './target/*' 2>/dev/null)
