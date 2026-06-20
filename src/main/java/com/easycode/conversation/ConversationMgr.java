@@ -6,70 +6,80 @@ import com.fasterxml.jackson.databind.JsonNode;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.function.Consumer;
 
 /** 会话管理：维护对话历史 */
 public final class ConversationMgr {
 
     private final List<MessageRecord> history = new ArrayList<>();
+    private final Consumer<MessageRecord> onAppend;
+    private final Consumer<List<MessageRecord>> onReplace;
     private String systemPrompt = "";
 
-    /** 追加用户消息 */
+    public ConversationMgr() { this(null, null); }
+    public ConversationMgr(Consumer<MessageRecord> onAppend, Consumer<List<MessageRecord>> onReplace) {
+        this.onAppend = onAppend; this.onReplace = onReplace;
+    }
+
+    // ---- 追加 ----
+
     public void addUserMessage(String content) {
-        history.add(new MessageRecord(Role.USER, content));
+        var msg = new MessageRecord(Role.USER, content);
+        history.add(msg);
+        if (onAppend != null) onAppend.accept(msg);
     }
 
-    /** 追加助手消息 */
     public void addAssistantMessage(String content) {
-        history.add(new MessageRecord(Role.ASSISTANT, content));
+        var msg = new MessageRecord(Role.ASSISTANT, content);
+        history.add(msg);
+        if (onAppend != null) onAppend.accept(msg);
     }
 
-    /** 返回对话历史的不可变副本 */
     public List<MessageRecord> getHistory() {
         return Collections.unmodifiableList(new ArrayList<>(history));
     }
 
-    /** 追加任意消息（含 block 结构） */
     public void addMessage(MessageRecord msg) {
         history.add(msg);
+        if (onAppend != null) onAppend.accept(msg);
     }
 
-    /** 追加工具调用消息 */
     public void addToolUse(ToolCall call) {
-        history.add(new MessageRecord(Role.ASSISTANT, "",
-                List.of(new MessageBlock.ToolUseBlock(call.id(), call.name(), call.input()))));
+        var msg = new MessageRecord(Role.ASSISTANT, "",
+                List.of(new MessageBlock.ToolUseBlock(call.id(), call.name(), call.input())));
+        history.add(msg);
+        if (onAppend != null) onAppend.accept(msg);
     }
 
-    /** 追加工具调用消息（接受分散参数） */
     public void addToolUse(String toolId, String toolName, JsonNode input) {
-        history.add(new MessageRecord(Role.ASSISTANT, "",
-                List.of(new MessageBlock.ToolUseBlock(toolId, toolName, input))));
+        var msg = new MessageRecord(Role.ASSISTANT, "",
+                List.of(new MessageBlock.ToolUseBlock(toolId, toolName, input)));
+        history.add(msg);
+        if (onAppend != null) onAppend.accept(msg);
     }
 
-    /** 追加工具结果消息 */
     public void addToolResult(String toolUseId, String content, boolean isError) {
-        history.add(new MessageRecord(Role.USER, "",
-                List.of(new MessageBlock.ToolResultBlock(toolUseId, content, isError))));
+        var msg = new MessageRecord(Role.USER, "",
+                List.of(new MessageBlock.ToolResultBlock(toolUseId, content, isError)));
+        history.add(msg);
+        if (onAppend != null) onAppend.accept(msg);
     }
 
-    /** 设置 system prompt，注入到历史第一条 */
-    public void setSystemPrompt(String prompt) {
-        this.systemPrompt = prompt;
-    }
+    public void setSystemPrompt(String prompt) { this.systemPrompt = prompt; }
 
-    /** 替换指定位置的消息 */
+    // ---- 修改 ----
+
     public void replaceMessage(int index, MessageRecord msg) {
-        if (index >= 0 && index < history.size()) {
-            history.set(index, msg);
-        }
+        if (index >= 0 && index < history.size()) history.set(index, msg);
     }
 
-    /** 替换全部历史 */
     public void replaceAll(List<MessageRecord> newHistory) {
         history.clear();
         history.addAll(newHistory);
+        if (onReplace != null) onReplace.accept(newHistory);
     }
 
-    /** 结合 ReplacementLedger 组装消息列表：用冻结的替换字符串替换已决策的 toolResult（F5d） */
+    /** ch08: 结合 ReplacementLedger 组装消息列表 */
     public List<MessageRecord> assembleMessages(ReplacementLedger ledger) {
         List<MessageRecord> result = new ArrayList<>();
         for (MessageRecord msg : getHistory()) {
@@ -81,23 +91,51 @@ public final class ConversationMgr {
                     if (replacement != null) {
                         newBlocks.add(new MessageBlock.ToolResultBlock(tr.toolUseId(), replacement, tr.isError()));
                         changed = true;
-                    } else {
-                        newBlocks.add(b);
-                    }
-                } else {
-                    newBlocks.add(b);
-                }
+                    } else { newBlocks.add(b); }
+                } else { newBlocks.add(b); }
             }
-            if (changed) {
-                result.add(new MessageRecord(msg.role(), msg.content(), newBlocks));
-            } else {
-                result.add(msg);
-            }
+            result.add(changed ? new MessageRecord(msg.role(), msg.content(), newBlocks) : msg);
         }
         return result;
     }
 
-    /** Token 数估算：总字符数 / 3 */
+    /** 修复 role 交替违规——防止 USER→USER 连续导致 API 截断返回空文本 */
+    public void fixRoleAlternation() {
+        if (history.size() < 2) return;
+        for (int i = 1; i < history.size(); i++) {
+            Role prev = history.get(i - 1).role();
+            Role curr = history.get(i).role();
+            if (prev == Role.USER && curr == Role.USER) {
+                // 合并两条连续 USER 消息，而非插入无意义的占位消息
+                MessageRecord a = history.get(i - 1);
+                MessageRecord b = history.get(i);
+                String mergedContent = joinContent(a.content(), b.content());
+                List<MessageBlock> mergedBlocks = new ArrayList<>(a.blocks());
+                mergedBlocks.addAll(b.blocks());
+                history.set(i - 1, new MessageRecord(Role.USER, mergedContent, mergedBlocks));
+                history.remove(i);
+                i--; // 重新检查当前位置
+            } else if (prev == Role.ASSISTANT && curr == Role.ASSISTANT) {
+                MessageRecord a = history.get(i - 1);
+                MessageRecord b = history.get(i);
+                String mergedContent = joinContent(a.content(), b.content());
+                List<MessageBlock> mergedBlocks = new ArrayList<>(a.blocks());
+                mergedBlocks.addAll(b.blocks());
+                history.set(i - 1, new MessageRecord(Role.ASSISTANT, mergedContent, mergedBlocks));
+                history.remove(i);
+                i--;
+            }
+        }
+    }
+
+    private static String joinContent(String a, String b) {
+        if (a == null || a.isBlank()) return b != null ? b : "";
+        if (b == null || b.isBlank()) return a;
+        return a + "\n\n" + b;
+    }
+
+    // ---- 估算与裁剪 ----
+
     public int estimateTokens() {
         long totalChars = 0;
         for (MessageRecord m : history) {
@@ -107,10 +145,9 @@ public final class ConversationMgr {
                 else if (b instanceof MessageBlock.ToolResultBlock tr) totalChars += tr.content().length();
             }
         }
-        return (int) (totalChars / 3);
+        return (int)(totalChars / 3);
     }
 
-    /** 窗口裁剪：保留首条（system prompt）+ 最后一条 user，从前往后删旧消息 */
     public void trimToWindow(int maxTokens) {
         if (history.isEmpty()) return;
         while (estimateTokens() > maxTokens && history.size() > 2) {
@@ -118,10 +155,7 @@ public final class ConversationMgr {
             while (lastUser > 0 && history.get(lastUser).role() != Role.USER) lastUser--;
             if (lastUser <= 0) break;
             for (int i = 1; i < history.size(); i++) {
-                if (i != lastUser) {
-                    history.remove(i);
-                    break;
-                }
+                if (i != lastUser) { history.remove(i); break; }
             }
         }
     }

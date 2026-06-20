@@ -32,3 +32,5 @@ rules:
   - Bash(ls -R src/test/java/com/easycode/ --format=single-column)
 
   - Bash(ls -la *.yaml *.md *.txt pom.xml 2>/dev/null)
+
+  - Bash(ls -la ".easycode/sessions/20260620-212535-ed55/" 2>/dev/null && cat ".easycode/sessions/20260620-212535-ed55/"*.json 2>/dev/null | head -100 || echo "无此会话目录")

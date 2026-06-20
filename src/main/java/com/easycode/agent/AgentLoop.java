@@ -2,6 +2,8 @@ package com.easycode.agent;
 
 import com.easycode.config.Config;
 import com.easycode.context.ContextManager;
+import com.easycode.memory.MemoryStore;
+import com.easycode.memory.MemoryUpdater;
 import com.easycode.context.CompressEvent;
 import com.easycode.context.SessionManager;
 import com.easycode.conversation.ConversationMgr;
@@ -42,18 +44,29 @@ public final class AgentLoop {
     private boolean planMode;
     private PermissionMode permMode = PermissionMode.DEFAULT;
     private final ContextManager contextManager;
+    private final String instructions;
+    private final String memoryIndex;
+    private final MemoryStore projectMemory;
+    private final MemoryStore userMemory;
+    private int turnCount;
     private int totalInputTokens;
     private int totalOutputTokens;
     private int emptyTextRetries;
+    private static final String EMPTY_TEXT_NUDGE = "[系统提示] 你上一轮没有输出任何文本。请根据之前的工具调用结果，给出你的分析和回答。不要只调工具不说话，也不要让输出为空。";
 
     public AgentLoop(LlmProvider provider, ToolRegistry tools,
-                     ConversationMgr conversation, Config config, String appVersion) {
+                     ConversationMgr conversation, Config config, String appVersion,
+                     String instructions, String memoryIndex) {
         this.provider = provider;
         this.tools = tools;
         this.conversation = conversation;
         this.config = config;
         this.appVersion = appVersion;
+        this.instructions = instructions;
+        this.memoryIndex = memoryIndex;
         this.contextManager = new ContextManager(provider, config, SessionManager.sessionId());
+        this.projectMemory = new MemoryStore(Path.of(".easycode/memory"));
+        this.userMemory = new MemoryStore(Path.of(java.lang.System.getProperty("user.home"), ".easycode/memory"));
     }
 
     public String run(String userMessage, Consumer<AgentEvent> eventSink) {
@@ -62,7 +75,7 @@ public final class AgentLoop {
         emptyTextRetries = 0;
         conversation.addUserMessage(userMessage);
         Environment env = Environment.collect(appVersion, config.model());
-        String stablePrompt = Prompt.buildStable();
+        String stablePrompt = Prompt.buildSystemPrompt(instructions, memoryIndex);
         PermissionPipeline pipeline = new PermissionPipeline(PermissionConfig.load(Path.of("").toAbsolutePath()));
         if (permMode == PermissionMode.DEFAULT) permMode = pipeline.startMode();
         for (int round = 1; round <= MAX_ITERATIONS; round++) {
@@ -80,6 +93,8 @@ public final class AgentLoop {
                 reminder = Reminder.planReminder(Reminder.isFullReminder(round));
             }
             // ch08: 上下文管理
+            // 每轮请求前修复 role 交替违规（防止 API 截断返回空文本）
+            conversation.fixRoleAlternation();
             CompressEvent autoEvt = contextManager.autoManage(this.conversation, toolsJson);
             if (autoEvt.replacedCount() > 0 || !autoEvt.success()) {
                 eventSink.accept(new AgentEvent.ContextCompress(autoEvt));
@@ -128,6 +143,16 @@ public final class AgentLoop {
                     eventSink.accept(new AgentEvent.Error("连续 " + MAX_EMPTY_TEXT_RETRIES + " 轮无文本输出，已停止", false));
                     eventSink.accept(new AgentEvent.AgentFinished(null, round, totalInputTokens, totalOutputTokens));
                     return null;
+                }
+                // 注入 nudge 消息——合并到最后一条 USER 消息，避免制造 USER→USER 违规
+                var hist = conversation.getHistory();
+                var last = hist.get(hist.size() - 1);
+                if (last.role() == Role.USER) {
+                    String merged = last.content() + "\n\n" + EMPTY_TEXT_NUDGE;
+                    conversation.replaceMessage(hist.size() - 1,
+                        new MessageRecord(Role.USER, merged, last.blocks()));
+                } else {
+                    conversation.addUserMessage(EMPTY_TEXT_NUDGE);
                 }
                 continue;
             }
@@ -188,6 +213,15 @@ public final class AgentLoop {
             }
             conversation.addMessage(new MessageRecord(Role.ASSISTANT, "", useBlocks));
             // F19a: 文件追踪——ReadFile 成功后记录
+            // ch09: 记忆更新——每 5 轮或含关键词时异步触发（F35-F36）
+            turnCount++;
+            String latestUser = userMessage;
+            boolean hasKeyword = latestUser != null && (latestUser.contains("记住") || latestUser.contains("记忆")
+                || latestUser.contains("别忘") || latestUser.contains("remember") || latestUser.contains("memo"));
+            if (turnCount % 5 == 0 || hasKeyword) {
+                List<MessageRecord> recent = conversation.getHistory();
+                MemoryUpdater.updateAsync(provider, recent, projectMemory, userMemory);
+            }
             for (int i = 0; i < toolCalls.size(); i++) {
                 ToolCall tc = toolCalls.get(i);
                 ToolResult r = results.get(i);

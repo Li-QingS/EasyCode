@@ -1,10 +1,11 @@
 # EasyCode — 终端 AI 编程助手
 
 Java 17 实现，模块化系统提示 + 五层权限防御 + MCP 客户端，ReAct Agent Loop 自动循环调用工具直到任务完成。
+支持上下文管理，两层压缩策略保证长时间对话不因 Token 溢出而中断。
 
 ## 技术栈
 
-Java 17 + Maven | JLine 3.27.1 | Jackson 2.18.2 | JDK HttpClient (SSE) | JUnit 5 | ripgrep | MCP (JSON-RPC 2.0)
+Java 17 + Maven | JLine 3.27.1 | Jackson 2.18.2 | JDK HttpClient (SSE) | JUnit 5 | ripgrep | MCP (JSON-RPC 2.0) | 上下文压缩
 
 ## 模块架构 (ch05)
 
@@ -49,6 +50,26 @@ prompt 包         llm 包           agent 包
 
 **当前接入:** Context7 (2 个只读工具)
 
+## 上下文管理 (ch08) — 两层压缩
+
+```
+每次 API 请求前:
+  → ① 轻量预防: 单工具结果 > 20KB → 落盘 + 对话留预览
+  → ② 重量兜底: 总 token 逼近窗口 → LLM 9 部分结构摘要
+       → 恢复三段: 文件快照 + 工具列表 + 边界提示
+```
+
+| 参数 | 值 |
+|------|----|
+| 单条落盘阈值 | 20,000 字节 |
+| 单轮聚合阈值 | 200,000 字节 |
+| 自动触发余量 | 13,000 tokens |
+| 手动 `/compact` | 无条件触发，3,000 tokens 余量 |
+| 熔断 | 连续 3 次失败 → 停止自动触发 |
+| 紧急压缩 | `prompt_too_long` → 强制第 1 层 + 摘要 + 重试一次 |
+| 估算比 | chars / 3.5，锚定上次 API usage |
+| 会话目录 | `.EasyCode/sessions/<unix_ts>-<hex>/` |
+
 ## 工具矩阵
 
 | 工具 | 分类 | 权限 | 来源 | 功能 |
@@ -66,8 +87,9 @@ prompt 包         llm 包           agent 包
 - 分类元信息: SEARCH/FILE/SHELL, ToolRegistry 按分类管理、按权限过滤
 - 权限分级: 只读自动, 读写 `[y/n]` 确认 (可配规则放行)
 - 破坏性标记: 仅 exec_command
-- Plan Mode: `/plan` 仅注入只读工具, `/do` 恢复全部 (固定回 default 模式)
+- Plan Mode: `/perm` → PLAN（仅注入只读工具，ch06 权限模式统一入口）
 - 权限切换: Shift+Tab 循环四档模式; `/perm` 查看并切换
+- 上下文压缩: `/compact` 手动触发 LLM 摘要，自动触发在窗口逼近时执行
 - 退出码语义表: grep/diff/find 退出码1≠错误
 - 路径清洗统一: `Tool.resolvePath()` 反斜杠/Windows盘符自动转换
 
@@ -94,7 +116,7 @@ mcp_servers:
 ```bash
 cd "/mnt/d/agent project/EasyCode"
 mvn compile                   # 编译
-mvn test                      # 72 个用例
+mvn test                      # 82 个用例
 mvn -q -DskipTests package    # 打包
 java -jar target/easy-code-agent-1.0-SNAPSHOT.jar   # 启动
 ```
@@ -139,5 +161,6 @@ java -jar target/easy-code-agent-1.0-SNAPSHOT.jar   # 启动
 | `docs/ch05/` | 系统提示工程化 spec/plan/task/checklist |
 | `docs/ch06/` | 权限系统 (五层防御) spec/plan/task/checklist |
 | `docs/ch07/` | MCP 客户端 spec/plan/task/checklist |
+| `docs/ch08/` | 上下文管理 (两层压缩) spec/plan/task/checklist |
 | `CODEX.md` | 项目上下文 + 工具描述规范 + 调试原则 |
-| `问题及解决方法.md` | 开发问题记录 (40+个) |
+| `问题及解决方法.md` | 开发问题记录 (43 个) |

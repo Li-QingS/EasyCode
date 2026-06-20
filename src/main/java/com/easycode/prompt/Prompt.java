@@ -46,10 +46,13 @@ public final class Prompt {
     }
 
     /** 构建稳定系统提示（固定模块 + 可选模块，不含环境信息） */
-    public static String buildStable() {
+    public static String buildStable() { return buildSystemPrompt("", ""); }
+    public static String buildSystemPrompt(String instructions, String memory) {
         List<Module> all = new ArrayList<>();
         all.addAll(fixedModules());
         all.addAll(optionalModules());
+        if (instructions != null && !instructions.isBlank()) all.add(new Module("custom-instructions", 80, instructions));
+        if (memory != null && !memory.isBlank()) all.add(new Module("long-term-memory", 100, memory));
         return assemble(all);
     }
 }

@@ -80,7 +80,7 @@ class AgentLoopTest {
         var provider = new SingleTextProvider("你好");
         ToolRegistry registry = new ToolRegistry();
         ConversationMgr conv = new ConversationMgr();
-        AgentLoop loop = new AgentLoop(provider, registry, conv, testConfig(), "test");
+        AgentLoop loop = new AgentLoop(provider, registry, conv, testConfig(), "test", "", "");
 
         List<AgentEvent> events = new ArrayList<>();
         String result = loop.run("hello", events::add);
@@ -112,7 +112,7 @@ class AgentLoopTest {
         ToolCall tc = new ToolCall("tcid", "mock_read", json.createObjectNode());
         var provider = new ToolCallProvider(List.of(tc), "最终答复", 1);
         ConversationMgr conv = new ConversationMgr();
-        AgentLoop loop = new AgentLoop(provider, registry, conv, testConfig(), "test");
+        AgentLoop loop = new AgentLoop(provider, registry, conv, testConfig(), "test", "", "");
 
         List<AgentEvent> events = new ArrayList<>();
         String result = loop.run("do it", events::add);
@@ -129,7 +129,7 @@ class AgentLoopTest {
         ToolCall tc = new ToolCall("tcid", "unknown_tool", json.createObjectNode());
         var provider = new AlwaysToolProvider(tc);
         ConversationMgr conv = new ConversationMgr();
-        AgentLoop loop = new AgentLoop(provider, registry, conv, testConfig(), "test");
+        AgentLoop loop = new AgentLoop(provider, registry, conv, testConfig(), "test", "", "");
 
         List<AgentEvent> events = new ArrayList<>();
         String result = loop.run("do it", events::add);
@@ -157,7 +157,7 @@ class AgentLoopTest {
         var provider = new ErrorProvider();
         ToolRegistry registry = new ToolRegistry();
         ConversationMgr conv = new ConversationMgr();
-        AgentLoop loop = new AgentLoop(provider, registry, conv, testConfig(), "test");
+        AgentLoop loop = new AgentLoop(provider, registry, conv, testConfig(), "test", "", "");
 
         List<AgentEvent> events = new ArrayList<>();
         String result = loop.run("do it", events::add);
