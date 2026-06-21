@@ -14,8 +14,8 @@ public final class Config {
     @JsonProperty("api_key")
     private String apiKey;
 
-    private Integer contextWindow;
     @com.fasterxml.jackson.annotation.JsonProperty("context_window")
+    private Integer contextWindow;
     private int toolTimeout = 30;
     @JsonProperty("mcp_servers")
     private Map<String, com.easycode.mcp.McpServerConfig> mcpServers = Map.of();

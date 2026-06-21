@@ -16,6 +16,7 @@ import com.easycode.permission.PermissionMode;
 import com.easycode.permission.PermissionPipeline;
 import com.easycode.prompt.Environment;
 import com.easycode.prompt.Prompt;
+import com.easycode.skill.SkillRegistry;
 import com.easycode.prompt.Reminder;
 import com.easycode.provider.LlmProvider;
 import com.easycode.provider.Request;
@@ -28,6 +29,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.function.Consumer;
 
@@ -48,6 +50,7 @@ public final class AgentLoop {
     private final String memoryIndex;
     private final MemoryStore projectMemory;
     private final MemoryStore userMemory;
+    private final SkillRegistry skillRegistry;
     private int turnCount;
     private int totalInputTokens;
     private int totalOutputTokens;
@@ -57,6 +60,12 @@ public final class AgentLoop {
     public AgentLoop(LlmProvider provider, ToolRegistry tools,
                      ConversationMgr conversation, Config config, String appVersion,
                      String instructions, String memoryIndex) {
+        this(provider, tools, conversation, config, appVersion, instructions, memoryIndex, null);
+    }
+
+    public AgentLoop(LlmProvider provider, ToolRegistry tools,
+                     ConversationMgr conversation, Config config, String appVersion,
+                     String instructions, String memoryIndex, SkillRegistry skillRegistry) {
         this.provider = provider;
         this.tools = tools;
         this.conversation = conversation;
@@ -64,6 +73,7 @@ public final class AgentLoop {
         this.appVersion = appVersion;
         this.instructions = instructions;
         this.memoryIndex = memoryIndex;
+        this.skillRegistry = skillRegistry;
         this.contextManager = new ContextManager(provider, config, SessionManager.sessionId());
         this.projectMemory = new MemoryStore(Path.of(".easycode/memory"));
         this.userMemory = new MemoryStore(Path.of(java.lang.System.getProperty("user.home"), ".easycode/memory"));
@@ -75,7 +85,8 @@ public final class AgentLoop {
         emptyTextRetries = 0;
         conversation.addUserMessage(userMessage);
         Environment env = Environment.collect(appVersion, config.model());
-        String stablePrompt = Prompt.buildSystemPrompt(instructions, memoryIndex);
+        String activatedSkills = skillRegistry != null ? skillRegistry.getActivatedPrompt() : null;
+        String stablePrompt = Prompt.buildWithSkills(instructions, memoryIndex, activatedSkills);
         PermissionPipeline pipeline = new PermissionPipeline(PermissionConfig.load(Path.of("").toAbsolutePath()));
         if (permMode == PermissionMode.DEFAULT) permMode = pipeline.startMode();
         for (int round = 1; round <= MAX_ITERATIONS; round++) {
@@ -85,9 +96,21 @@ public final class AgentLoop {
                 return null;
             }
             eventSink.accept(new AgentEvent.IterationProgress(round, MAX_ITERATIONS));
-            List<JsonNode> toolsJson = planMode
-                    ? tools.toToolsJson(Tool.Permission.READ_ONLY)
-                    : tools.toToolsJson();
+            Set<String> whitelist = (skillRegistry != null) ? skillRegistry.activeToolWhitelist() : java.util.Collections.emptySet();
+            List<JsonNode> toolsJson;
+            if (planMode) {
+                if (!whitelist.isEmpty()) {
+                    toolsJson = tools.toToolsJson(whitelist);
+                } else {
+                    toolsJson = tools.toToolsJson(Tool.Permission.READ_ONLY);
+                }
+            } else {
+                if (!whitelist.isEmpty()) {
+                    toolsJson = tools.toToolsJson(whitelist);
+                } else {
+                    toolsJson = tools.toToolsJson();
+                }
+            }
             String reminder = "";
             if (planMode) {
                 reminder = Reminder.planReminder(Reminder.isFullReminder(round));
@@ -127,6 +150,8 @@ public final class AgentLoop {
             if (toolCalls.isEmpty() && !finalText.isBlank()) {
                 emptyTextRetries = 0;
                 conversation.addAssistantMessage(finalText);
+                // AgentLoop 完成时无条件清除 Skill 白名单
+                if (skillRegistry != null) skillRegistry.clearWhitelist();
                 eventSink.accept(new AgentEvent.AgentFinished(finalText, round, totalInputTokens, totalOutputTokens));
                 return finalText;
             }
@@ -134,6 +159,7 @@ public final class AgentLoop {
             if (toolCalls.isEmpty() && !thinkingText.isBlank()) {
                 emptyTextRetries = 0;
                 conversation.addAssistantMessage(thinkingText);
+                if (skillRegistry != null) skillRegistry.clearWhitelist();
                 eventSink.accept(new AgentEvent.AgentFinished(thinkingText, round, totalInputTokens, totalOutputTokens));
                 return thinkingText;
             }
@@ -231,6 +257,7 @@ public final class AgentLoop {
             }
             conversation.addMessage(new MessageRecord(Role.USER, "", resultBlocks));
         }
+        if (skillRegistry != null) skillRegistry.clearWhitelist();
         eventSink.accept(new AgentEvent.AgentFinished(null, MAX_ITERATIONS, totalInputTokens, totalOutputTokens));
         return null;
     }

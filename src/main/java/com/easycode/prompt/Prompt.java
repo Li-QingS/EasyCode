@@ -48,11 +48,21 @@ public final class Prompt {
     /** 构建稳定系统提示（固定模块 + 可选模块，不含环境信息） */
     public static String buildStable() { return buildSystemPrompt("", ""); }
     public static String buildSystemPrompt(String instructions, String memory) {
+        return buildWithSkills(instructions, memory, null);
+    }
+
+    /** 构建系统提示，含已激活 Skill（填入 priority 90 槽位）。activatedSkills 为 null 时不填充。 */
+    public static String buildWithSkills(String instructions, String memory, String activatedSkills) {
         List<Module> all = new ArrayList<>();
         all.addAll(fixedModules());
         all.addAll(optionalModules());
         if (instructions != null && !instructions.isBlank()) all.add(new Module("custom-instructions", 80, instructions));
         if (memory != null && !memory.isBlank()) all.add(new Module("long-term-memory", 100, memory));
+        // 已激活 Skill 填充
+        if (activatedSkills != null && !activatedSkills.isBlank()) {
+            all.removeIf(m -> m.name().equals("已激活 Skill"));
+            all.add(new Module("已激活 Skill", 90, activatedSkills));
+        }
         return assemble(all);
     }
 }

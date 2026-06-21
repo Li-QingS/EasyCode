@@ -5,7 +5,7 @@ import java.util.List;
 
 /**
  * 注册全部内置命令到 CommandRegistry。
- * 当前共 10 个：/help /compact /clear /plan /do /session /memory /permission /status /review
+ * 当前共 9 个：/help /compact /clear /plan /do /session /memory /permission /status
  */
 public final class BuiltinCommands {
     private BuiltinCommands() {}
@@ -234,17 +234,7 @@ public final class BuiltinCommands {
             .type(CommandType.LOCAL)
             .build());
 
-        // /review — 代码审查预设提示词
-        list.add(CommandDef.builder("review", args -> {
-            String prompt = "请审查当前项目代码，找出潜在问题（bug、安全隐患、性能问题、代码异味、设计缺陷），" +
-                "并给出改进建议。请按严重程度排序，每个问题说明位置、原因和修复方案。";
-            return new CommandResult.Prompt(prompt);
-        })
-            .aliases("rv")
-            .description("注入代码审查提示词，让 AI 审查当前项目代码")
-            .usage("/review")
-            .type(CommandType.PROMPT)
-            .build());
+
 
         return list;
     }
