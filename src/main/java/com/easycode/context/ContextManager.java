@@ -72,9 +72,9 @@ public final class ContextManager {
         sessionLock.lock();
         try {
             long before = estimator.estimate(conv);
-        boolean ok = SummaryGenerator.summarize(conv, provider, ledger, fileTracker, tools);
-        estimator.reset();  // 先 reset 再估算，否则 anchor 支配 after 值
-        long after = estimator.estimate(conv);
+            boolean ok = SummaryGenerator.summarize(conv, provider, ledger, fileTracker, tools);
+            estimator.reset();
+            long after = estimator.estimate(conv);
             knownMessageCount = conv.getHistory().size();
             return ok ? CompressEvent.ok(CompressEvent.CompressReason.MANUAL, before, after, 0)
                       : CompressEvent.fail(CompressEvent.CompressReason.MANUAL, "摘要生成失败");

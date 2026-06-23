@@ -1,6 +1,13 @@
 package com.easycode;
 
 import com.easycode.agent.AgentLoop;
+import com.easycode.hook.HookConfig;
+import com.easycode.hook.HookEngine;
+import com.easycode.subagent.AgentDefLoader;
+import com.easycode.subagent.RunAgentTool;
+import com.easycode.subagent.TaskManager;
+import com.easycode.subagent.WorktreeManager;
+import com.easycode.team.TeamPersistence;
 import com.easycode.session.SessionContext;
 import com.easycode.instructions.InstructionLoader;
 import com.easycode.memory.MemoryInjector;
@@ -57,6 +64,39 @@ public final class Main {
             LoadSkillTool loadSkillTool = new LoadSkillTool(skillRegistry);
             registry.register(loadSkillTool);
 
+            // Hook 系统初始化
+            var hookRules = HookConfig.load(Path.of("").toAbsolutePath());
+            HookEngine hookEngine = new HookEngine(hookRules);
+            hookEngine.fire(com.easycode.hook.HookEvent.STARTUP, java.util.Map.of());
+            Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+                hookEngine.fire(com.easycode.hook.HookEvent.SHUTDOWN, java.util.Map.of());
+                hookEngine.shutdown();
+            }, "hook-shutdown"));
+
+            // 子 Agent 系统初始化
+            var agentDefs = AgentDefLoader.loadAll(Path.of("").toAbsolutePath());
+            System.err.println("[main] loaded " + agentDefs.size() + " agent definitions");
+            TaskManager taskManager = new TaskManager();
+            Runtime.getRuntime().addShutdownHook(new Thread(taskManager::shutdown, "taskmanager-shutdown"));
+            WorktreeManager worktreeManager = new WorktreeManager(Path.of("").toAbsolutePath());
+            worktreeManager.cleanExpired(24 * 60 * 60 * 1000);
+
+            // Team Lead 系统初始化
+            try {
+                var teamNames = TeamPersistence.listTeams();
+                if (!teamNames.isEmpty()) {
+                    System.err.println("[main] found " + teamNames.size() + " team(s): " + String.join(", ", teamNames));
+                }
+            } catch (Exception e) {
+                System.err.println("[main] team init skipped: " + e.getMessage());
+            }
+
+            RunAgentTool runAgentTool = new RunAgentTool(agentDefs, registry, provider, config, hookEngine,
+                conversation::getHistory, taskManager, worktreeManager);
+            registry.register(runAgentTool);
+
+            // 注入 HookEngine 到 ToolExecutor
+
             String instructions = InstructionLoader.load(Path.of("").toAbsolutePath());
             String skillsText = skillRegistry.buildAvailableSkillsText();
             if (!skillsText.isEmpty()) {
@@ -68,7 +108,9 @@ public final class Main {
             CommandRegistry cmdRegistry = new CommandRegistry();
             CommandDispatcher dispatcher = new CommandDispatcher(cmdRegistry, null);
             AgentLoop agentLoop = new AgentLoop(provider, registry, conversation, config, "1.0.0",
-                instructions, memoryIndex, skillRegistry);
+                instructions, memoryIndex, skillRegistry, hookEngine);
+            // 注入 HookEngine 到 ToolExecutor（静态工具类）
+            com.easycode.agent.ToolExecutor.setHookEngine(hookEngine);
             Tui tui = new Tui(agentLoop, registry, conversation, config, pipeline, dispatcher, sessionId);
             dispatcher.setUi(tui);
             dispatcher.setSkillRegistry(skillRegistry);

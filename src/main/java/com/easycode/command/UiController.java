@@ -1,6 +1,7 @@
 package com.easycode.command;
 
 import com.easycode.permission.PermissionMode;
+import java.util.List;
 
 /**
  * 界面控制接口：让命令实现不绑定具体渲染框架。
@@ -17,4 +18,6 @@ public interface UiController {
     String triggerCompact();
     String sessionId();
     long startTimeMs();
+    /** 加载会话历史到当前 AgentLoop（用于 /session resume） */
+    void loadSessionHistory(List<com.easycode.conversation.MessageRecord> messages);
 }

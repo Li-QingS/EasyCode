@@ -109,7 +109,9 @@ public final class SummaryGenerator {
     private static boolean isPromptTooLong(Throwable e) {
         if (e == null) return false;
         String msg = e.getMessage() != null ? e.getMessage().toLowerCase() : "";
-        if (msg.contains("prompt_too_long") || msg.contains("prompt too long")) return true;
+        if (msg.contains("prompt_too_long") || msg.contains("prompt too long")
+            || msg.contains("提示词过长") || msg.contains("token") && msg.contains("exceed"))
+            return true;
         return isPromptTooLong(e.getCause());
     }
 

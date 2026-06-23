@@ -2,6 +2,9 @@ package com.easycode.agent;
 
 import com.easycode.config.Config;
 import com.easycode.context.ContextManager;
+import com.easycode.hook.HookEngine;
+import com.easycode.hook.HookEvent;
+import com.easycode.team.lead.CoordinatorMode;
 import com.easycode.memory.MemoryStore;
 import com.easycode.memory.MemoryUpdater;
 import com.easycode.context.CompressEvent;
@@ -51,6 +54,7 @@ public final class AgentLoop {
     private final MemoryStore projectMemory;
     private final MemoryStore userMemory;
     private final SkillRegistry skillRegistry;
+    private final HookEngine hookEngine;
     private int turnCount;
     private int totalInputTokens;
     private int totalOutputTokens;
@@ -60,12 +64,19 @@ public final class AgentLoop {
     public AgentLoop(LlmProvider provider, ToolRegistry tools,
                      ConversationMgr conversation, Config config, String appVersion,
                      String instructions, String memoryIndex) {
-        this(provider, tools, conversation, config, appVersion, instructions, memoryIndex, null);
+        this(provider, tools, conversation, config, appVersion, instructions, memoryIndex, null, null);
     }
 
     public AgentLoop(LlmProvider provider, ToolRegistry tools,
                      ConversationMgr conversation, Config config, String appVersion,
                      String instructions, String memoryIndex, SkillRegistry skillRegistry) {
+        this(provider, tools, conversation, config, appVersion, instructions, memoryIndex, skillRegistry, null);
+    }
+
+    public AgentLoop(LlmProvider provider, ToolRegistry tools,
+                     ConversationMgr conversation, Config config, String appVersion,
+                     String instructions, String memoryIndex, SkillRegistry skillRegistry,
+                     HookEngine hookEngine) {
         this.provider = provider;
         this.tools = tools;
         this.conversation = conversation;
@@ -74,6 +85,7 @@ public final class AgentLoop {
         this.instructions = instructions;
         this.memoryIndex = memoryIndex;
         this.skillRegistry = skillRegistry;
+        this.hookEngine = hookEngine != null ? hookEngine : new HookEngine(java.util.List.of());
         this.contextManager = new ContextManager(provider, config, SessionManager.sessionId());
         this.projectMemory = new MemoryStore(Path.of(".easycode/memory"));
         this.userMemory = new MemoryStore(Path.of(java.lang.System.getProperty("user.home"), ".easycode/memory"));
@@ -87,6 +99,9 @@ public final class AgentLoop {
         Environment env = Environment.collect(appVersion, config.model());
         String activatedSkills = skillRegistry != null ? skillRegistry.getActivatedPrompt() : null;
         String stablePrompt = Prompt.buildWithSkills(instructions, memoryIndex, activatedSkills);
+        // Hook: session-start prompt injection
+        String sessionPrompts = hookEngine.collectPrompts(HookEvent.SESSION_START, java.util.Map.of("sessionId", SessionManager.sessionId()));
+        if (!sessionPrompts.isEmpty()) stablePrompt = stablePrompt + "\n\n" + sessionPrompts;
         PermissionPipeline pipeline = new PermissionPipeline(PermissionConfig.load(Path.of("").toAbsolutePath()));
         if (permMode == PermissionMode.DEFAULT) permMode = pipeline.startMode();
         for (int round = 1; round <= MAX_ITERATIONS; round++) {
@@ -96,6 +111,8 @@ public final class AgentLoop {
                 return null;
             }
             eventSink.accept(new AgentEvent.IterationProgress(round, MAX_ITERATIONS));
+            // Hook: turn-start prompt injection
+            String turnPrompts = hookEngine.collectPrompts(HookEvent.TURN_START, java.util.Map.of("round", round));
             Set<String> whitelist = (skillRegistry != null) ? skillRegistry.activeToolWhitelist() : java.util.Collections.emptySet();
             List<JsonNode> toolsJson;
             if (planMode) {
@@ -111,6 +128,15 @@ public final class AgentLoop {
                     toolsJson = tools.toToolsJson();
                 }
             }
+            // Coordinator 模式：移除写文件工具
+            if (CoordinatorMode.isActive()) {
+                toolsJson = toolsJson.stream()
+                    .filter(n -> {
+                        String name = n.has("name") ? n.get("name").asText() : "";
+                        return !"write_file".equals(name) && !"edit_file".equals(name);
+                    })
+                    .collect(java.util.stream.Collectors.toList());
+            }
             String reminder = "";
             if (planMode) {
                 reminder = Reminder.planReminder(Reminder.isFullReminder(round));
@@ -123,15 +149,52 @@ public final class AgentLoop {
                 eventSink.accept(new AgentEvent.ContextCompress(autoEvt));
             }
             contextManager.markRequested(conversation.getHistory().size());
+            // Hook: pre-llm-request
+            var preLlmVars = new java.util.HashMap<String, Object>();
+            preLlmVars.put("messageCount", conversation.getHistory().size());
+            hookEngine.fire(HookEvent.PRE_LLM_REQUEST, preLlmVars);
+            String preLlmPrompts = hookEngine.collectPrompts(HookEvent.PRE_LLM_REQUEST, preLlmVars);
+            String effectiveSystem = stablePrompt + (preLlmPrompts.isEmpty() ? "" : "\n\n" + preLlmPrompts);
+            // Also apply turn-start prompts if collected
+            if (!turnPrompts.isEmpty()) effectiveSystem = effectiveSystem + "\n\n" + turnPrompts;
             Request req = new Request(conversation.getHistory(), toolsJson,
-                    new System(stablePrompt, env.render()), reminder);
+                    new System(effectiveSystem, env.render()), reminder);
             StreamingCollector collector = new StreamingCollector(eventSink);
             try {
                 provider.chatStream(req, collector);
             } catch (Exception e) {
-                eventSink.accept(new AgentEvent.Error("Provider error: " + e.getMessage(), false));
-                eventSink.accept(new AgentEvent.AgentFinished(null, round, totalInputTokens, totalOutputTokens));
-                return null;
+                // F25-F26: prompt_too_long 触发紧急压缩后重试
+                if (isPromptTooLong(e) && round <= 3) {
+                    eventSink.accept(new AgentEvent.Error("上下文超限，触发紧急压缩...", true));
+                    CompressEvent emEvt = contextManager.emergencyCompact(this.conversation, toolsJson);
+                    eventSink.accept(new AgentEvent.ContextCompress(emEvt));
+                    if (emEvt.success()) {
+                        contextManager.markRequested(conversation.getHistory().size());
+                        try {
+                            provider.chatStream(new Request(conversation.getHistory(), toolsJson,
+                                new System(stablePrompt, env.render()), reminder), collector);
+                            // 重试成功，继续正常流程
+                        } catch (Exception retryEx) {
+                            eventSink.accept(new AgentEvent.Error("紧急压缩后仍失败: " + retryEx.getMessage(), false));
+                            eventSink.accept(new AgentEvent.AgentFinished(null, round, totalInputTokens, totalOutputTokens));
+                            return null;
+                        }
+                        if (collector.hasError()) {
+                            eventSink.accept(new AgentEvent.Error(collector.getErrorMessage(), false));
+                            eventSink.accept(new AgentEvent.AgentFinished(null, round, totalInputTokens, totalOutputTokens));
+                            return null;
+                        }
+                        // 重试成功，跳过下面的错误处理，继续正常流程
+                    } else {
+                        eventSink.accept(new AgentEvent.Error("紧急压缩失败: " + emEvt.errorMessage(), false));
+                        eventSink.accept(new AgentEvent.AgentFinished(null, round, totalInputTokens, totalOutputTokens));
+                        return null;
+                    }
+                } else {
+                    eventSink.accept(new AgentEvent.Error("Provider error: " + e.getMessage(), false));
+                    eventSink.accept(new AgentEvent.AgentFinished(null, round, totalInputTokens, totalOutputTokens));
+                    return null;
+                }
             }
             if (collector.hasError()) {
                 eventSink.accept(new AgentEvent.Error(collector.getErrorMessage(), false));
@@ -140,6 +203,11 @@ public final class AgentLoop {
             }
             int roundIn = collector.getRoundInputTokens();
             int roundOut = collector.getRoundOutputTokens();
+            // Hook: post-llm-response
+            var postLlmVars = new java.util.HashMap<String, Object>();
+            postLlmVars.put("text", collector.getFullText());
+            postLlmVars.put("toolCallCount", collector.getToolCalls().size());
+            hookEngine.fire(HookEvent.POST_LLM_RESPONSE, postLlmVars);
             contextManager.updateUsage(roundIn, collector.getCacheReadTokens(), 0, roundOut);
             totalInputTokens += roundIn;
             totalOutputTokens += roundOut;
@@ -152,6 +220,7 @@ public final class AgentLoop {
                 conversation.addAssistantMessage(finalText);
                 // AgentLoop 完成时无条件清除 Skill 白名单
                 if (skillRegistry != null) skillRegistry.clearWhitelist();
+                hookEngine.fire(HookEvent.SESSION_END, java.util.Map.of("totalRounds", round));
                 eventSink.accept(new AgentEvent.AgentFinished(finalText, round, totalInputTokens, totalOutputTokens));
                 return finalText;
             }
@@ -160,6 +229,7 @@ public final class AgentLoop {
                 emptyTextRetries = 0;
                 conversation.addAssistantMessage(thinkingText);
                 if (skillRegistry != null) skillRegistry.clearWhitelist();
+                hookEngine.fire(HookEvent.SESSION_END, java.util.Map.of("totalRounds", round));
                 eventSink.accept(new AgentEvent.AgentFinished(thinkingText, round, totalInputTokens, totalOutputTokens));
                 return thinkingText;
             }
@@ -258,6 +328,7 @@ public final class AgentLoop {
             conversation.addMessage(new MessageRecord(Role.USER, "", resultBlocks));
         }
         if (skillRegistry != null) skillRegistry.clearWhitelist();
+        hookEngine.fire(HookEvent.SESSION_END, java.util.Map.of("totalRounds", MAX_ITERATIONS));
         eventSink.accept(new AgentEvent.AgentFinished(null, MAX_ITERATIONS, totalInputTokens, totalOutputTokens));
         return null;
     }
@@ -271,6 +342,33 @@ public final class AgentLoop {
     /** /compact 命令入口（F22） */
     public CompressEvent forceCompact(List<JsonNode> tools) {
         return contextManager.manualCompact(this.conversation, tools);
+    }
+
+    /** 加载会话历史（F21：恢复会话时使用） */
+    public void loadHistory(java.util.List<MessageRecord> messages) {
+        conversation.replaceAll(new java.util.ArrayList<>(messages));
+        contextManager.reset();
+    }
+
+    /** 获取会话管理器的引用（供 Tui 使用） */
+    public ConversationMgr conversation() { return conversation; }
+
+    /** 获取 LLM Provider（供 SubAgent 复用） */
+    public LlmProvider getProvider() { return provider; }
+
+    /** 获取 Config（供 SubAgent 复用） */
+    public Config getConfig() { return config; }
+
+    /** 获取 HookEngine（供 SubAgent 复用） */
+    public HookEngine getHookEngine() { return hookEngine; }
+
+    private static boolean isPromptTooLong(Throwable e) {
+        if (e == null) return false;
+        String msg = (e.getMessage() != null ? e.getMessage() : "").toLowerCase();
+        if (msg.contains("prompt_too_long") || msg.contains("prompt too long")
+            || msg.contains("提示词过长") || msg.contains("token") && msg.contains("exceed"))
+            return true;
+        return isPromptTooLong(e.getCause());
     }
 
     private String extractPreview(ToolCall tc) {

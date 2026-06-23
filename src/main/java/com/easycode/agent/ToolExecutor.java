@@ -1,5 +1,7 @@
 package com.easycode.agent;
 
+import com.easycode.hook.HookEngine;
+import com.easycode.hook.HookEvent;
 import com.easycode.permission.PermissionContext;
 import com.easycode.permission.PermissionPipeline;
 import com.easycode.permission.PermissionResult;
@@ -20,8 +22,14 @@ import java.util.function.Consumer;
 public final class ToolExecutor {
 
     private static final int TOOL_TIMEOUT_SEC = 30;
+    private static HookEngine hookEngine;
 
     private ToolExecutor() {}
+
+    /** 注入 HookEngine（由 Main.java 在启动时调用） */
+    public static void setHookEngine(HookEngine engine) {
+        hookEngine = engine;
+    }
 
     public static List<ToolResult> executeAll(
             List<ToolCall> calls, ToolRegistry registry,
@@ -95,6 +103,14 @@ public final class ToolExecutor {
             PermissionPipeline pipeline, PermissionContext permCtx) {
         try {
             Tool tool = registry.get(call.name());
+            // Hook: pre-tool 拦截
+            if (hookEngine != null) {
+                var vars = new java.util.HashMap<String, Object>();
+                vars.put("name", call.name());
+                vars.put("input", call.input().toString());
+                var intercept = hookEngine.fire(HookEvent.PRE_TOOL, vars);
+                if (intercept.isPresent()) return intercept.get();
+            }
             // 权限检查
             PermissionResult pr = pipeline.check(call, tool, permCtx);
             if (pr == PermissionResult.DENY) {
@@ -104,7 +120,16 @@ public final class ToolExecutor {
             if (pr == PermissionResult.ASK) {
                 return ToolResult.askPending(call.name(), "需要用户确认: " + call.name());
             }
-            return tool.execute(call.input());
+            ToolResult result = tool.execute(call.input());
+            // Hook: post-tool
+            if (hookEngine != null) {
+                var vars = new java.util.HashMap<String, Object>();
+                vars.put("name", call.name());
+                vars.put("success", result.success());
+                vars.put("contentLen", result.content() != null ? result.content().length() : 0);
+                hookEngine.fire(HookEvent.POST_TOOL, vars);
+            }
+            return result;
         } catch (Exception e) {
             return ToolResult.err(call.name(), "工具执行异常: " + e.getMessage(), 0);
         }

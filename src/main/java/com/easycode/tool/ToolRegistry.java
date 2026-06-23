@@ -74,4 +74,9 @@ public final class ToolRegistry {
         if (t == null) throw new IllegalArgumentException("未注册的工具: " + name);
         return t.permission();
     }
+
+    /** 获取所有已注册的工具（只读列表） */
+    public List<Tool> all() {
+        return List.copyOf(tools.values());
+    }
 }

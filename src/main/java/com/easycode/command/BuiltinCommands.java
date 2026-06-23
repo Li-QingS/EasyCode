@@ -96,17 +96,36 @@ public final class BuiltinCommands {
         list.add(CommandDef.builder("session", args -> {
             if (args != null && !args.trim().isEmpty()) {
                 // /session resume <id> — 直接恢复指定会话
-                String[] parts = args.trim().split("\s+", 2);
+                String[] parts = args.trim().split("\\s+", 2);
                 if (parts.length >= 2 && "resume".equalsIgnoreCase(parts[0])) {
                     try {
                         java.nio.file.Path jsonl = com.easycode.session.SessionContext.jsonlPath(parts[1]);
                         var msgs = com.easycode.session.SessionResumer.resume(jsonl);
-                        return new CommandResult.Message("已恢复会话 " + parts[1] + "，共 " + msgs.size() + " 条消息");
+                        ui.loadSessionHistory(msgs);
+                        ui.sendUserMessage("/status");
+                        return new CommandResult.Message("已恢复会话 " + parts[1] + "，共 " + msgs.size() + " 条消息，可以继续对话。");
                     } catch (Exception e) {
                         return new CommandResult.Error("恢复失败: " + e.getMessage());
                     }
                 }
-                return new CommandResult.Error("用法: /session resume <id>");
+                // /session <序号> — 快捷恢复
+                try {
+                    int idx = Integer.parseInt(args.trim()) - 1;
+                    var sessions = com.easycode.session.SessionResumer.scanAll(java.nio.file.Path.of(".easycode/sessions"));
+                    if (idx >= 0 && idx < sessions.size()) {
+                        var sel = sessions.get(idx);
+                        java.nio.file.Path jsonl = com.easycode.session.SessionContext.jsonlPath(sel.id());
+                        var msgs = com.easycode.session.SessionResumer.resume(jsonl);
+                        ui.loadSessionHistory(msgs);
+                        ui.sendUserMessage("/status");
+                        return new CommandResult.Message("已恢复会话 " + sel.id() + "，共 " + msgs.size() + " 条消息，可以继续对话。");
+                    }
+                    return new CommandResult.Error("无效序号: " + (idx + 1));
+                } catch (NumberFormatException nfe) {
+                    return new CommandResult.Error("用法: /session [resume <id> | <序号>]");
+                } catch (java.io.IOException ioe) {
+                    return new CommandResult.Error("恢复失败: " + ioe.getMessage());
+                }
             }
             // 无参数：展示当前会话 + 可恢复历史列表
             String sid = ui.sessionId();
@@ -117,41 +136,21 @@ public final class BuiltinCommands {
             sb.append("累计输入: ").append(tokens[2]).append("  累计输出: ").append(tokens[3]).append("\n");
             var sessions = com.easycode.session.SessionResumer.scanAll(java.nio.file.Path.of(".easycode/sessions"));
             if (!sessions.isEmpty()) {
-                sb.append("\n可恢复的会话:\n");
-                for (int i = 0; i < sessions.size(); i++) {
+                sb.append("\n可恢复的会话 (/session <序号> 恢复):\n");
+                for (int i = 0; i < Math.min(sessions.size(), 10); i++) {
                     var s = sessions.get(i);
                     String title = s.title() != null ? s.title() : "(无标题)";
                     sb.append("  [").append(i + 1).append("] ").append(title)
                       .append("  —  ").append(com.easycode.session.SessionResumer.relativeTime(s.lastModified())).append("\n");
                 }
-                sb.append("输入数字恢复 (1-").append(sessions.size()).append(", Enter=取消): ");
-                ui.showMessage(sb.toString());
-                try {
-                    StringBuilder input = new StringBuilder();
-                    while (true) {
-                        int ch = java.lang.System.in.read();
-                        if (ch == '\n' || ch == '\r') break;
-                        if (ch >= '0' && ch <= '9') input.append((char) ch);
-                    }
-                    if (input.length() > 0) {
-                        int idx = Integer.parseInt(input.toString()) - 1;
-                        if (idx >= 0 && idx < sessions.size()) {
-                            var sel = sessions.get(idx);
-                            java.nio.file.Path jsonl = com.easycode.session.SessionContext.jsonlPath(sel.id());
-                            var msgs = com.easycode.session.SessionResumer.resume(jsonl);
-                            return new CommandResult.Message("已恢复会话 " + sel.id() + "，共 " + msgs.size() + " 条消息");
-                        }
-                        return new CommandResult.Error("无效序号");
-                    }
-                } catch (java.io.IOException e) { /* 取消 */ }
-                return new CommandResult.Ok();
+                if (sessions.size() > 10) sb.append("  ... 共 ").append(sessions.size()).append(" 个会话\n");
             }
             return new CommandResult.Message(sb.toString());
         })
             .aliases("sess")
-            .description("显示当前会话信息，列出可恢复的历史会话")
-            .usage("/session [resume <id>]")
-            .paramHint("[resume <id>]")
+            .description("显示当前会话信息，列出可恢复的历史会话，/session <序号> 或 /session resume <id> 恢复")
+            .usage("/session [resume <id> | <序号>]")
+            .paramHint("[resume <id> | <序号>]")
             .type(CommandType.LOCAL)
             .build());
 

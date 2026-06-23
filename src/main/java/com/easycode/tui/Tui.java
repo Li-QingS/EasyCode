@@ -359,6 +359,11 @@ public final class Tui implements UiController {
 
     @Override public String sessionId() { return sessionId; }
 
+    @Override
+    public void loadSessionHistory(java.util.List<com.easycode.conversation.MessageRecord> messages) {
+        agentLoop.loadHistory(messages);
+    }
+
     @Override public long startTimeMs() { return appStartTime; }
 
     // ======================== Tab 补全 ========================
