@@ -107,11 +107,13 @@ public final class AgentDefLoader {
         int maxTurns = intVal(frontMatter, "max_turns", 10);
         String permission = stringVal(frontMatter, "permission");
         String isolation = stringVal(frontMatter, "isolation");
+        int timeoutSec = intVal(frontMatter, "timeout_sec", 120);
 
         return new AgentDef(name != null ? name : "", desc != null ? desc : "",
             body, toolsAllow, toolsDeny, model != null ? model : "", maxTurns,
             permission != null ? permission : "",
-            isolation != null ? isolation : "none");
+            isolation != null ? isolation : "none", timeoutSec);
+
     }
 
     private static String stringVal(Map<String, Object> m, String key) {

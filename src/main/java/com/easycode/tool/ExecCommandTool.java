@@ -68,6 +68,10 @@ public final class ExecCommandTool implements Tool {
                 return ToolResult.err(name(), "危险命令被拦截: " + cmd, System.currentTimeMillis() - start);
             }
             ProcessBuilder pb = new ProcessBuilder("bash", "-c", cmd);
+            // Worktree 隔离：读 workingDir 设置命令工作目录
+            if (input.has("workingDir") && !input.get("workingDir").isNull()) {
+                pb.directory(java.nio.file.Path.of(input.get("workingDir").asText()).toFile());
+            }
             Process proc = pb.start();
             // 分别读 stdout 和 stderr
             Future<String> outFuture = Executors.newSingleThreadExecutor().submit(() -> {

@@ -12,7 +12,8 @@ public record AgentDef(
     String model,
     int maxTurns,
     String permission,
-    String isolation
+    String isolation,
+    int timeoutSec
 ) {
     public AgentDef {
         if (name == null || name.isBlank()) throw new IllegalArgumentException("name is required");
@@ -23,5 +24,6 @@ public record AgentDef(
         if (maxTurns <= 0) maxTurns = 10;
         if (permission == null) permission = "";
         if (isolation == null) isolation = "none";
+        if (timeoutSec <= 0) timeoutSec = 120;
     }
 }

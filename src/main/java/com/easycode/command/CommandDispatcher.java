@@ -12,6 +12,7 @@ import java.util.Optional;
 public final class CommandDispatcher {
     private final CommandRegistry registry;
     private UiController ui;
+    private com.easycode.subagent.TaskManager taskManager;
 
     public CommandDispatcher(CommandRegistry registry, UiController ui) {
         this.registry = registry;
@@ -21,6 +22,9 @@ public final class CommandDispatcher {
     /** 注册全部内置命令并锁定注册表 */
         public void setUi(UiController ui) { this.ui = ui; }
 
+    private com.easycode.subagent.WorktreeManager worktreeManager;
+    public void setWorktreeManager(com.easycode.subagent.WorktreeManager wm) { this.worktreeManager = wm; }
+    public void setTaskManager(com.easycode.subagent.TaskManager tm) { this.taskManager = tm; }
     // ====== Skill 命令注册（T9） ======
 
         private com.easycode.skill.SkillRegistry skillRegistry;
@@ -86,7 +90,7 @@ public final class CommandDispatcher {
         }
     }
     public void registerBuiltins() {
-        List<CommandDef> builtins = BuiltinCommands.all(ui, registry);
+        List<CommandDef> builtins = BuiltinCommands.all(ui, registry, taskManager, worktreeManager);
         registry.registerAll(builtins);
         registry.seal();
     }

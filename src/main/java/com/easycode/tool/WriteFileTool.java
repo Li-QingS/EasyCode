@@ -40,7 +40,8 @@ public final class WriteFileTool implements Tool {
             if (content.length() > MAX_CONTENT)
                 return ToolResult.err(name(), "[过大] 内容超过 500KB", 0);
 
-            Files.createDirectories(filePath.getParent());
+            if (filePath.getParent() != null)
+                Files.createDirectories(filePath.getParent());
             Files.writeString(filePath, content);
             long size = Files.size(filePath);
             return ToolResult.ok(name(), "写入成功: " + filePath + " (" + size + " 字节)",

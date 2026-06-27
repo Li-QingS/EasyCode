@@ -76,10 +76,10 @@ public final class Main {
             // 子 Agent 系统初始化
             var agentDefs = AgentDefLoader.loadAll(Path.of("").toAbsolutePath());
             System.err.println("[main] loaded " + agentDefs.size() + " agent definitions");
-            TaskManager taskManager = new TaskManager();
-            Runtime.getRuntime().addShutdownHook(new Thread(taskManager::shutdown, "taskmanager-shutdown"));
             WorktreeManager worktreeManager = new WorktreeManager(Path.of("").toAbsolutePath());
             worktreeManager.cleanExpired(24 * 60 * 60 * 1000);
+            TaskManager taskManager = new TaskManager(worktreeManager);
+            Runtime.getRuntime().addShutdownHook(new Thread(taskManager::shutdown, "taskmanager-shutdown"));
 
             // Team Lead 系统初始化
             try {
@@ -108,12 +108,14 @@ public final class Main {
             CommandRegistry cmdRegistry = new CommandRegistry();
             CommandDispatcher dispatcher = new CommandDispatcher(cmdRegistry, null);
             AgentLoop agentLoop = new AgentLoop(provider, registry, conversation, config, "1.0.0",
-                instructions, memoryIndex, skillRegistry, hookEngine);
+                instructions, memoryIndex, skillRegistry, hookEngine, taskManager, worktreeManager);
             // 注入 HookEngine 到 ToolExecutor（静态工具类）
             com.easycode.agent.ToolExecutor.setHookEngine(hookEngine);
             Tui tui = new Tui(agentLoop, registry, conversation, config, pipeline, dispatcher, sessionId);
             dispatcher.setUi(tui);
             dispatcher.setSkillRegistry(skillRegistry);
+            dispatcher.setTaskManager(taskManager);
+            dispatcher.setWorktreeManager(worktreeManager);
             dispatcher.setSkillContext(conversation, registry, provider, config);
             dispatcher.registerSkillCommands();
             dispatcher.registerBuiltins();

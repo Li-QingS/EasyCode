@@ -13,6 +13,8 @@ import com.easycode.conversation.ConversationMgr;
 import com.easycode.conversation.MessageBlock;
 import com.easycode.conversation.MessageRecord;
 import com.easycode.conversation.Role;
+import com.easycode.subagent.TaskManager;
+import com.easycode.subagent.TaskRecord;
 import com.easycode.permission.PermissionConfig;
 import com.easycode.permission.PermissionContext;
 import com.easycode.permission.PermissionMode;
@@ -54,6 +56,8 @@ public final class AgentLoop {
     private final MemoryStore projectMemory;
     private final MemoryStore userMemory;
     private final SkillRegistry skillRegistry;
+    private final TaskManager taskManager;
+    private final com.easycode.subagent.WorktreeManager worktreeManager;
     private final HookEngine hookEngine;
     private int turnCount;
     private int totalInputTokens;
@@ -64,19 +68,20 @@ public final class AgentLoop {
     public AgentLoop(LlmProvider provider, ToolRegistry tools,
                      ConversationMgr conversation, Config config, String appVersion,
                      String instructions, String memoryIndex) {
-        this(provider, tools, conversation, config, appVersion, instructions, memoryIndex, null, null);
+        this(provider, tools, conversation, config, appVersion, instructions, memoryIndex, null, null, null, null);
     }
 
     public AgentLoop(LlmProvider provider, ToolRegistry tools,
                      ConversationMgr conversation, Config config, String appVersion,
                      String instructions, String memoryIndex, SkillRegistry skillRegistry) {
-        this(provider, tools, conversation, config, appVersion, instructions, memoryIndex, skillRegistry, null);
+        this(provider, tools, conversation, config, appVersion, instructions, memoryIndex, skillRegistry, null, null, null);
     }
 
     public AgentLoop(LlmProvider provider, ToolRegistry tools,
                      ConversationMgr conversation, Config config, String appVersion,
                      String instructions, String memoryIndex, SkillRegistry skillRegistry,
-                     HookEngine hookEngine) {
+                     HookEngine hookEngine, TaskManager taskManager,
+                     com.easycode.subagent.WorktreeManager worktreeManager) {
         this.provider = provider;
         this.tools = tools;
         this.conversation = conversation;
@@ -86,6 +91,8 @@ public final class AgentLoop {
         this.memoryIndex = memoryIndex;
         this.skillRegistry = skillRegistry;
         this.hookEngine = hookEngine != null ? hookEngine : new HookEngine(java.util.List.of());
+        this.taskManager = taskManager;
+        this.worktreeManager = worktreeManager;
         this.contextManager = new ContextManager(provider, config, SessionManager.sessionId());
         this.projectMemory = new MemoryStore(Path.of(".easycode/memory"));
         this.userMemory = new MemoryStore(Path.of(java.lang.System.getProperty("user.home"), ".easycode/memory"));
@@ -93,6 +100,15 @@ public final class AgentLoop {
 
     public String run(String userMessage, Consumer<AgentEvent> eventSink) {
         cancelled = false;
+        // 拉取已完成的后台子 Agent 结果，注入对话
+        if (taskManager != null) {
+            for (TaskRecord r : taskManager.drainCompleted()) {
+                String summary = "[后台子 Agent 完成]\\n任务: " + r.agentName()
+                    + "\\n状态: " + r.status() + "\\n轮次: " + r.turnsUsed()
+                    + "\\n\\n--- 输出 ---\\n" + r.output();
+                conversation.addUserMessage(summary);
+            }
+        }
         int consecutiveUnknownTools = 0;
         emptyTextRetries = 0;
         conversation.addUserMessage(userMessage);
@@ -102,6 +118,7 @@ public final class AgentLoop {
         // Hook: session-start prompt injection
         String sessionPrompts = hookEngine.collectPrompts(HookEvent.SESSION_START, java.util.Map.of("sessionId", SessionManager.sessionId()));
         if (!sessionPrompts.isEmpty()) stablePrompt = stablePrompt + "\n\n" + sessionPrompts;
+            hookEngine.fire(HookEvent.SESSION_START, java.util.Map.of("sessionId", SessionManager.sessionId()));
         PermissionPipeline pipeline = new PermissionPipeline(PermissionConfig.load(Path.of("").toAbsolutePath()));
         if (permMode == PermissionMode.DEFAULT) permMode = pipeline.startMode();
         for (int round = 1; round <= MAX_ITERATIONS; round++) {
@@ -111,15 +128,25 @@ public final class AgentLoop {
                 return null;
             }
             eventSink.accept(new AgentEvent.IterationProgress(round, MAX_ITERATIONS));
+            // 每轮开始前检查已完成后台子 Agent 任务
+            if (taskManager != null) {
+                for (TaskRecord r : taskManager.drainCompleted()) {
+                    String summary = "[后台子 Agent 完成]\n任务: " + r.agentName()
+                        + "\n状态: " + r.status() + "\n轮次: " + r.turnsUsed()
+                        + "\n\n--- 输出 ---\n" + r.output();
+                    conversation.addUserMessage(summary);
+                }
+            }
             // Hook: turn-start prompt injection
             String turnPrompts = hookEngine.collectPrompts(HookEvent.TURN_START, java.util.Map.of("round", round));
+            hookEngine.fire(HookEvent.TURN_START, java.util.Map.of("round", round));
             Set<String> whitelist = (skillRegistry != null) ? skillRegistry.activeToolWhitelist() : java.util.Collections.emptySet();
             List<JsonNode> toolsJson;
             if (planMode) {
                 if (!whitelist.isEmpty()) {
                     toolsJson = tools.toToolsJson(whitelist);
                 } else {
-                    toolsJson = tools.toToolsJson(Tool.Permission.READ_ONLY);
+                    toolsJson = tools.toToolsJson(); // Plan 模式展示全部工具
                 }
             } else {
                 if (!whitelist.isEmpty()) {
@@ -274,6 +301,40 @@ public final class AgentLoop {
                     return null;
                 }
             } else { consecutiveUnknownTools = 0; }
+            // Plan/Whitelist 保护：拒绝不在本轮 toolsJson 中的工具调用（LLM 幻觉调用）
+            java.util.Set<String> allowedThisRound = toolsJson.stream()
+                .map(n -> n.get("name").asText())
+                .collect(java.util.stream.Collectors.toSet());
+            java.util.List<ToolCall> screenedCalls = new java.util.ArrayList<>(toolCalls);
+            toolCalls = new java.util.ArrayList<>();
+            java.util.List<MessageBlock> rejectedUse = new java.util.ArrayList<>();
+            java.util.List<MessageBlock> rejectedResults = new java.util.ArrayList<>();
+            for (ToolCall tc : screenedCalls) {
+                    if (allowedThisRound.contains(tc.name())) {
+                        if (planMode) {
+                            try {
+                                if (tools.getPermission(tc.name()) == Tool.Permission.READ_WRITE) {
+                                    rejectedUse.add(new MessageBlock.ToolUseBlock(tc.id(), tc.name(), tc.input()));
+                                    rejectedResults.add(new MessageBlock.ToolResultBlock(tc.id(),
+                                        "Plan 模式拒绝写操作: " + tc.name() + "（在计划中描述此操作，切换模式后执行）", true));
+                                } else {
+                                    toolCalls.add(tc);
+                                }
+                            } catch (IllegalArgumentException e) { toolCalls.add(tc); }
+                        } else {
+                            toolCalls.add(tc);
+                        }
+                } else {
+                    rejectedUse.add(new MessageBlock.ToolUseBlock(tc.id(), tc.name(), tc.input()));
+                    rejectedResults.add(new MessageBlock.ToolResultBlock(tc.id(),
+                        "系统拒绝: 当前模式下不允许调用 " + tc.name() + "（仅允许只读工具）", true));
+                }
+            }
+            if (!rejectedResults.isEmpty()) {
+                conversation.addMessage(new MessageRecord(Role.ASSISTANT, "", rejectedUse));
+                conversation.addMessage(new MessageRecord(Role.USER, "", rejectedResults));
+                if (toolCalls.isEmpty()) continue;
+            }
             for (int i = 0; i < toolCalls.size(); i++) {
                 eventSink.accept(new AgentEvent.ToolCallStart(i, toolCalls.get(i).id(), toolCalls.get(i).name()));
             }

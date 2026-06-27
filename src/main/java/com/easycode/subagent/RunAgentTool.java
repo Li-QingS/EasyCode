@@ -106,7 +106,7 @@ public class RunAgentTool implements Tool {
         } else {
             def = new AgentDef("fork", "Fork 子 Agent",
                 "你是主 Agent 的子进程，继承对话历史。请根据 prompt 完成任务。",
-                List.of(), List.of(), "", 10, "", "none");
+                List.of(), List.of(), "", 10, "", "none", 120);
         }
 
         // Worktree 隔离
@@ -128,9 +128,10 @@ public class RunAgentTool implements Tool {
         ToolRegistry filteredTools = buildFiltered(def);
         List<MessageRecord> seeds = "fork".equals(mode)
             ? new ArrayList<>(conversationAccessor.getHistory()) : List.of();
-        if ("fork".equals(mode)) background = true;
+        // 所有模式统一后台运行——不再强制 fork 为 background
 
-        String taskId = UUID.randomUUID().toString().substring(0, 8);
+        String taskId;
+        taskId = UUID.randomUUID().toString().substring(0, 8);
         SubAgent subAgent = new SubAgent(taskId, def, prompt, seeds,
             provider, config, hookEngine, filteredTools, worktreeRoot);
 
@@ -139,17 +140,17 @@ public class RunAgentTool implements Tool {
             + ", bg=" + background + ", taskId=" + taskId + ")" + worktreeInfo;
         System.err.println("[run_agent] " + envInfo);
 
-        taskManager.submit(subAgent, background);
+        taskId = taskManager.submit(subAgent, background, taskId);
+        if (worktreeRoot != null) taskManager.setWorktree(taskId, worktreeRoot);
+        System.err.println("[run_agent] submitted taskId=" + taskId);
 
+        // 所有子 Agent 统一后台运行——不阻塞主 Agent 循环
+        // 结果由 AgentLoop 的 drainCompleted() 在下轮自动注入
         if (!background) {
-            try {
-                TaskRecord result = taskManager.await(taskId, 30);
-                return cleanupWorktree(formatResult(result, envInfo), worktreeRoot);
-            } catch (TimeoutException e) {
-                return ToolResult.ok("run_agent",
-                    envInfo + "\n任务已切换至后台，taskId=" + taskId
-                    + "\n可用 /bg " + taskId + " 查看结果", taskId.length());
-            }
+            // 非后台模式也返回 taskId，主 Agent 通过 drainCompleted 获取结果
+            return ToolResult.ok("run_agent",
+                envInfo + "\n任务已提交，taskId=" + taskId
+                + "\n（结果将在下轮自动呈现）", taskId.length());
         }
 
         return ToolResult.ok("run_agent",

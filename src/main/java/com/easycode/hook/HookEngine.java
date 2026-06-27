@@ -49,7 +49,9 @@ public class HookEngine {
                     String output = rule.action().execute(ctx);
                     log(rule.name(), "ok, output=" + (output != null ? output.length() : 0) + " chars");
                     if (rule.event() == HookEvent.PRE_TOOL) {
+                    if (output != null && !output.isBlank()) {
                         intercepts.add(ToolResult.err("hook:" + rule.name(), output, 0));
+                    }
                     }
                 } catch (Exception e) {
                     log(rule.name(), "FAILED: " + e.getMessage());

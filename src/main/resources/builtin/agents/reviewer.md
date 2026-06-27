@@ -5,7 +5,8 @@ tools_allow:
   - read_file
   - grep_code
   - find_files
-max_turns: 8
+max_turns: 20
+timeout_sec: 600
 permission: default
 ---
 

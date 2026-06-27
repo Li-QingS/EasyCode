@@ -22,15 +22,19 @@ public final class AnthropicProvider implements LlmProvider {
 
     private final Config config;
     private final HttpClient httpClient;
-    private StringBuilder toolCallBuilder;
-    private String toolCallId;
-    private String toolCallName;
 
     public AnthropicProvider(Config config) {
         this.config = config;
         this.httpClient = HttpClient.newHttpClient();
     }
 
+
+    /** 每次请求独立的工具调用解析状态（避免并发竞态） */
+    private static class ToolParseState {
+        StringBuilder builder;
+        String id;
+        String name;
+    }
     @Override
     public void chatStream(Request req, StreamHandler handler) {
         try {
@@ -43,11 +47,12 @@ public final class AnthropicProvider implements LlmProvider {
                     .POST(HttpRequest.BodyPublishers.ofString(requestBody))
                     .build();
 
+            ToolParseState state = new ToolParseState();
             httpClient.sendAsync(request, java.net.http.HttpResponse.BodyHandlers.fromLineSubscriber(
                 new Flow.Subscriber<>() {
                     private Flow.Subscription sub;
                     public void onSubscribe(Flow.Subscription s) { (sub = s).request(Long.MAX_VALUE); }
-                    public void onNext(String line) { parseSSELine(line, handler); sub.request(1); }
+                    public void onNext(String line) { AnthropicProvider.this.parseSSELine(line, handler, state); sub.request(1); }
                     public void onError(Throwable t) { handler.onError(new Exception(t)); }
                     public void onComplete() { handler.onComplete(); }
                 }
@@ -142,7 +147,7 @@ public final class AnthropicProvider implements LlmProvider {
         }
     }
 
-    private void parseSSELine(String line, StreamHandler handler) {
+    private void parseSSELine(String line, StreamHandler handler, ToolParseState s) {
         if (line == null || line.isBlank() || !line.startsWith("data: ")) return;
         if (DEBUG_SSE) java.lang.System.err.println("[SSE] " + line.substring(0, Math.min(line.length(), 200)));
         String data = line.substring(6);
@@ -162,24 +167,24 @@ public final class AnthropicProvider implements LlmProvider {
                 if (th != null && !th.isNull()) handler.onThinking(th.asText());
             } else if ("input_json_delta".equals(dt)) {
                 JsonNode p = delta.get("partial_json");
-                if (p != null && toolCallBuilder != null) toolCallBuilder.append(p.asText());
+                if (p != null && s.builder != null) s.builder.append(p.asText());
             }
         } else if ("content_block_start".equals(type)) {
             JsonNode block = node.get("content_block");
             if (block != null && "tool_use".equals(block.has("type") ? block.get("type").asText() : "")) {
-                toolCallBuilder = new StringBuilder();
-                toolCallId = block.get("id").asText();
-                toolCallName = block.get("name").asText();
+                s.builder = new StringBuilder();
+                s.id = block.get("id").asText();
+                s.name = block.get("name").asText();
             }
         } else if ("content_block_stop".equals(type)) {
-            if (toolCallBuilder != null && toolCallBuilder.length() > 0) {
+            if (s.builder != null && s.builder.length() > 0) {
                 try {
-                    JsonNode input = json.readTree(toolCallBuilder.toString());
-                    handler.onToolCall(new ToolCall(toolCallId, toolCallName, input));
+                    JsonNode input = json.readTree(s.builder.toString());
+                    handler.onToolCall(new ToolCall(s.id, s.name, input));
                 } catch (JsonProcessingException e) {
                     handler.onError(new Exception("工具参数解析失败: " + e.getMessage(), e));
                 }
-                toolCallBuilder = null; toolCallId = null; toolCallName = null;
+                s.builder = null; s.id = null; s.name = null;
             }
         } else if ("message_delta".equals(type)) {
             JsonNode usage = node.get("usage");

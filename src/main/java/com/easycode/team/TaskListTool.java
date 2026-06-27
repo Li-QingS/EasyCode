@@ -49,8 +49,9 @@ public class TaskListTool implements Tool {
         props.putObject("description").put("type", "string");
         props.putObject("status").put("type", "string");
         props.putObject("assignedTo").put("type", "string");
-        ArrayNode deps = props.putArray("dependsOn");
-        deps.addObject().put("type", "string");
+        ObjectNode deps = props.putObject("dependsOn");
+        deps.put("type", "array");
+        deps.putObject("items").put("type", "string");
         schema.putArray("required").add("action");
         return schema;
     }

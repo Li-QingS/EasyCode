@@ -74,7 +74,7 @@ public class InProcessRuntime implements MemberRuntime {
                 AgentDef def = new AgentDef(
                     member.name(), "团队成员",
                     "你是小组 [" + member.name() + "] 的成员。使用 team_task 查看和更新小组任务，使用 team_message 与其他成员沟通。",
-                    List.of(), List.of(), "", 20, "", "none");
+                    List.of(), List.of(), "", 20, "", "none", 120);
 
                 // 构建 SubAgent 并执行
                 Path workDir = member.workDir() != null ? member.workDir() : projectRoot;

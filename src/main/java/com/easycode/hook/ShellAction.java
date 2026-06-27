@@ -33,6 +33,13 @@ public record ShellAction(
             }
             if (cwd != null && !cwd.isBlank()) pb.directory(new java.io.File(cwd));
             if (env != null) pb.environment().putAll(env);
+            // 注入 hook 上下文变量为 shell 环境变量（$name, $success 等）
+            if (ctx.vars() != null) {
+                for (var e : ctx.vars().entrySet()) {
+                    Object v = e.getValue();
+                    if (v != null) pb.environment().put(e.getKey(), v.toString());
+                }
+            }
             pb.redirectErrorStream(true);
             Process p = pb.start();
             boolean finished = p.waitFor(timeoutSec, TimeUnit.SECONDS);

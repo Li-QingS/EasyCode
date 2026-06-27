@@ -86,14 +86,30 @@ public class SubAgent implements Callable<TaskRecord> {
         AtomicInteger turns = new AtomicInteger(0);
         AtomicInteger inTok = new AtomicInteger(0);
         AtomicInteger outTok = new AtomicInteger(0);
+        AtomicInteger toolCallCount = new AtomicInteger(0);
         AtomicReference<String> finalText = new AtomicReference<>("");
 
         // 跑到底：非交互执行
         try {
+            // 应用 AgentDef 的权限模式
+            String perm = def.permission();
+            if (perm != null && !perm.isBlank()) {
+                var mode = switch (perm.toLowerCase()) {
+                    case "default", "def" -> com.easycode.permission.PermissionMode.DEFAULT;
+                    case "edit", "accept_edits" -> com.easycode.permission.PermissionMode.ACCEPT_EDITS;
+                    case "plan" -> com.easycode.permission.PermissionMode.PLAN;
+                    case "bypass", "bypass_permissions" -> com.easycode.permission.PermissionMode.BYPASS_PERMISSIONS;
+                    default -> null;
+                };
+                if (mode != null) loop.setPermMode(mode);
+            }
             loop.run(prompt, event -> {
                 if (event instanceof AgentEvent.TokenUsage tu) {
                     inTok.addAndGet(tu.roundInput());
                     outTok.addAndGet(tu.roundOutput());
+                }
+                if (event instanceof AgentEvent.ToolCallStart) {
+                    toolCallCount.incrementAndGet();
                 }
                 if (event instanceof AgentEvent.AgentFinished af) {
                     if (af.finalText() != null) finalText.set(af.finalText());
@@ -103,18 +119,28 @@ public class SubAgent implements Callable<TaskRecord> {
         } catch (Exception e) {
             return new TaskRecord(taskId, def.name(), TaskStatus.ERROR,
                 "子 Agent 异常: " + e.getMessage(), turns.get(),
-                inTok.get(), outTok.get(), start, System.currentTimeMillis());
+                inTok.get(), outTok.get(), start, System.currentTimeMillis(),
+                worktreeRoot != null ? worktreeRoot.toString() : null);
         }
 
-        // 检查是否达到最大轮次
+        // 达到最大轮次但执行过工具调用：视为成功完成（工作已做完，只是 LLM 没产出收尾文本）
         if (turns.get() >= def.maxTurns() && finalText.get().isBlank()) {
+            if (toolCallCount.get() > 0) {
+                String output = "(子 Agent 在 " + turns.get() + " 轮中执行了 "
+                    + toolCallCount.get() + " 次工具调用，工作已完成但未产出收尾文本)";
+                return new TaskRecord(taskId, def.name(), TaskStatus.DONE,
+                    output, turns.get(), inTok.get(), outTok.get(), start,
+                    System.currentTimeMillis(), worktreeRoot != null ? worktreeRoot.toString() : null);
+            }
             return new TaskRecord(taskId, def.name(), TaskStatus.ERROR,
                 "达到最大轮次 " + def.maxTurns() + " 但无有效输出",
-                turns.get(), inTok.get(), outTok.get(), start, System.currentTimeMillis());
+                turns.get(), inTok.get(), outTok.get(), start,
+                System.currentTimeMillis(), worktreeRoot != null ? worktreeRoot.toString() : null);
         }
 
         String output = finalText.get().isBlank() ? "(子 Agent 完成但无文本输出)" : finalText.get();
         return new TaskRecord(taskId, def.name(), TaskStatus.DONE,
-            output, turns.get(), inTok.get(), outTok.get(), start, System.currentTimeMillis());
+            output, turns.get(), inTok.get(), outTok.get(), start,
+            System.currentTimeMillis(), worktreeRoot != null ? worktreeRoot.toString() : null);
     }
 }

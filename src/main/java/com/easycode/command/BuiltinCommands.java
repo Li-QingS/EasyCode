@@ -2,6 +2,8 @@ package com.easycode.command;
 
 import java.util.ArrayList;
 import java.util.List;
+import com.easycode.subagent.TaskManager;
+import com.easycode.subagent.TaskRecord;
 
 /**
  * 注册全部内置命令到 CommandRegistry。
@@ -10,7 +12,9 @@ import java.util.List;
 public final class BuiltinCommands {
     private BuiltinCommands() {}
 
-    public static List<CommandDef> all(UiController ui, CommandRegistry registry) {
+    public static List<CommandDef> all(UiController ui, CommandRegistry registry,
+                                      com.easycode.subagent.TaskManager taskManager,
+                                      com.easycode.subagent.WorktreeManager worktreeManager) {
         List<CommandDef> list = new ArrayList<>();
 
         // /help — 显示帮助信息
@@ -234,6 +238,105 @@ public final class BuiltinCommands {
             .build());
 
 
+
+
+        // /bg — 后台子 Agent 任务管理
+        list.add(CommandDef.builder("bg", args -> {
+            if (args != null && !args.trim().isEmpty()) {
+                // /bg <taskId> — 查看单个任务
+                String tid = args.trim();
+                var opt = taskManager.get(tid);
+                if (opt.isEmpty()) {
+                    return new CommandResult.Error("任务 " + tid + " 不存在或已过期");
+                }
+                TaskRecord r = opt.get();
+                StringBuilder sb = new StringBuilder();
+                sb.append("任务: ").append(r.id()).append(" (").append(r.agentName()).append(")\n");
+                sb.append("状态: ").append(r.status()).append(" | 轮次: ").append(r.turnsUsed()).append("\n");
+                sb.append("Tokens: 入").append(r.inputTokens()).append(" 出").append(r.outputTokens()).append("\n");
+                if (r.output() != null && !r.output().isBlank()) {
+                    sb.append("\n--- 输出 ---\n").append(r.output());
+                }
+                return new CommandResult.Message(sb.toString());
+            }
+            // /bg 无参数 — 列出所有任务
+            var all = taskManager.listAll();
+            if (all.isEmpty()) {
+                return new CommandResult.Message("没有后台任务");
+            }
+            StringBuilder sb = new StringBuilder();
+            sb.append("后台任务 (共 ").append(all.size()).append("):\n");
+            for (TaskRecord r : all) {
+                String statusIcon = switch (r.status()) {
+                    case PENDING -> "⏳";
+                    case RUNNING -> "🔄";
+                    case DONE -> "✅";
+                    case ERROR -> "❌";
+                    case TIMEOUT -> "⏰";
+                };
+                sb.append("  ").append(statusIcon).append(" ").append(r.id()).append(" ").append(r.agentName());
+                sb.append(" [").append(r.status()).append("]\n");
+            }
+            sb.append("\n/bg <taskId> 查看详情\n");
+            return new CommandResult.Message(sb.toString());
+        })
+            .description("查看后台子 Agent 任务 — /bg 列出全部，/bg <taskId> 查看详情")
+            .usage("/bg [taskId]")
+            .paramHint("[taskId]")
+            .type(CommandType.LOCAL)
+            .build());
+
+
+        // /worktree — Worktree 管理
+        list.add(CommandDef.builder("worktree", args -> {
+            if (worktreeManager == null) {
+                return new CommandResult.Error("Worktree 系统未初始化");
+            }
+            if (args != null && !args.trim().isEmpty()) {
+                String[] parts = args.trim().split("\\s+", 2);
+                if ("clean".equals(parts[0])) {
+                    worktreeManager.cleanExpired(0);
+                    return new CommandResult.Message("已清理全部 Worktree");
+                }
+                if ("remove".equals(parts[0]) && parts.length >= 2) {
+                    try {
+                        worktreeManager.remove(java.nio.file.Path.of(parts[1]));
+                        return new CommandResult.Message("已移除: " + parts[1]);
+                    } catch (Exception e) {
+                        return new CommandResult.Error("移除失败: " + e.getMessage());
+                    }
+                }
+                return new CommandResult.Error("用法: /worktree [clean | remove <path>]");
+            }
+            // 列出所有 worktree
+            java.nio.file.Path dir = worktreeManager.worktreesDir();
+            StringBuilder sb = new StringBuilder();
+            sb.append("Worktree 目录: ").append(dir).append("\n");
+            if (java.nio.file.Files.isDirectory(dir)) {
+                try (var entries = java.nio.file.Files.list(dir)) {
+                    java.util.List<java.nio.file.Path> wtList = entries.filter(java.nio.file.Files::isDirectory).toList();
+                    if (list.isEmpty()) {
+                        sb.append("  (空)\n");
+                    } else {
+                        for (var e : wtList) {
+                            long size = 0;
+                            try { size = java.nio.file.Files.size(e); } catch (Exception ignored) {}
+                            sb.append("  ").append(e.getFileName()).append("\n");
+                        }
+                    }
+                } catch (java.io.IOException ignored) {}
+            } else {
+                sb.append("  (目录不存在)\n");
+            }
+            sb.append("\n/worktree clean  清理全部\n");
+            sb.append("/worktree remove <path>  移除指定\n");
+            return new CommandResult.Message(sb.toString());
+        })
+            .description("管理 git worktree — /worktree 列出，/worktree clean 清理全部")
+            .usage("/worktree [clean | remove <path>]")
+            .paramHint("[clean | remove <path>]")
+            .type(CommandType.LOCAL)
+            .build());
 
         return list;
     }

@@ -111,19 +111,52 @@ public final class WorktreeManager {
             // 非致命：配置提交失败不影响 Worktree 使用
         }
 
+        // 记录初始 HEAD SHA，供 hasChanges() 检测已提交的变更
+        try {
+            ProcessBuilder revPb = new ProcessBuilder("git", "-C", wtPath.toString(),
+                "rev-parse", "HEAD");
+            revPb.redirectErrorStream(true);
+            Process revP = revPb.start();
+            String baseSha = new String(revP.getInputStream().readAllBytes()).trim();
+            revP.waitFor();
+            if (!baseSha.isEmpty()) {
+                Path refFile = worktreesDir.resolve(slug + ".base-ref");
+                Files.writeString(refFile, baseSha);
+            }
+        } catch (Exception ignored) {
+            // 非致命
+        }
+
         return wtPath.toAbsolutePath().normalize();
     }
 
-    /** 检测 Worktree 是否有未提交变更 */
+    /** 检测 Worktree 是否有变更（含未提交和已提交） */
     public boolean hasChanges(Path worktreeRoot) {
         try {
-            ProcessBuilder pb = new ProcessBuilder(
+            // 1. 检查未提交变更
+            ProcessBuilder statusPb = new ProcessBuilder(
                 "git", "-C", worktreeRoot.toString(), "status", "--porcelain");
-            pb.redirectErrorStream(true);
-            Process p = pb.start();
-            String output = new String(p.getInputStream().readAllBytes());
-            p.waitFor();
-            return !output.isBlank();
+            statusPb.redirectErrorStream(true);
+            Process statusP = statusPb.start();
+            String statusOutput = new String(statusP.getInputStream().readAllBytes());
+            statusP.waitFor();
+            if (!statusOutput.isBlank()) return true;
+
+            // 2. 检查是否有已提交的新 commit（对比初始 HEAD）
+            String slug = worktreeRoot.getFileName().toString();
+            Path refFile = worktreeRoot.resolveSibling(slug + ".base-ref");
+            if (Files.exists(refFile)) {
+                String baseSha = Files.readString(refFile).trim();
+                ProcessBuilder revPb = new ProcessBuilder("git", "-C", worktreeRoot.toString(),
+                    "rev-parse", "HEAD");
+                revPb.redirectErrorStream(true);
+                Process revP = revPb.start();
+                String headSha = new String(revP.getInputStream().readAllBytes()).trim();
+                revP.waitFor();
+                if (!headSha.isEmpty() && !headSha.equals(baseSha)) return true;
+            }
+
+            return false;
         } catch (Exception e) {
             // 出错时保守处理：视为有变更
             return true;
@@ -143,6 +176,13 @@ public final class WorktreeManager {
         } catch (Exception e) {
             // git worktree remove 失败也继续删目录
         }
+
+        // 删除 .base-ref 文件
+        try {
+            String slug = worktreeRoot.getFileName().toString();
+            Path refFile = worktreeRoot.resolveSibling(slug + ".base-ref");
+            Files.deleteIfExists(refFile);
+        } catch (IOException ignored) {}
 
         // 删除目录
         deleteRecursive(worktreeRoot);

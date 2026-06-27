@@ -18,6 +18,7 @@ import com.easycode.tool.ToolResult;
 import java.io.IOException;
 import java.nio.file.Path;
 import java.util.List;
+import java.util.regex.Pattern;
 import org.jline.reader.LineReader;
 import org.jline.reader.LineReaderBuilder;
 import org.jline.reader.Completer;
@@ -35,13 +36,16 @@ public final class Tui implements UiController {
     private static final String magenta="\033[35m",blue="\033[34m",boldOff="\033[22m";
     private static final String[] SPINNER={"\u280b","\u2819","\u2839","\u2838","\u283c","\u2834","\u2826","\u2827","\u2807","\u280f"};
 
+    /** 匹配 ANSI 转义序列，用于计算终端列宽 */
+    private static final Pattern ANSI = Pattern.compile("\033\\[[0-9;]*[a-zA-Z]");
+
     private final AgentLoop agentLoop; private final ToolRegistry tools;
     private final ConversationMgr conversation; private final Config config;
     private PermissionPipeline permPipeline; private PermissionMode permMode=PermissionMode.DEFAULT;
     private int totalInputTokens,totalOutputTokens,currentRound;
     private int lastRoundInputTokens,lastRoundOutputTokens;
     private volatile boolean spinnerRunning; private Thread spinnerThread;
-    private long startTime; private boolean lastEventWasTool,mdBold,mdCode,mdPendingStar,mdAtLineStart=true;
+    private long startTime; private boolean lastEventWasTool,mdBold,mdCode,mdPendingStar,mdAtLineStart=true,agentPrefixShown;
     private int mdHeadingHashes; private StringBuilder currentPreamble;
     private final CommandDispatcher dispatcher; private final long appStartTime;
     private final String sessionId;
@@ -111,28 +115,78 @@ public final class Tui implements UiController {
     // ======================== 欢迎与帮助 ========================
 
     private void printWelcome() {
-        String C="\033[1;36m",W="\033[0m",D="\033[2m",G="\033[32m",B="\033[1m",Y="\033[33m";
+        String C="\033[1;36m",W="\033[0m",D="\033[2m",G="\033[32m",B="\033[1m";
         String A="\033[38;5;51m",P="\033[38;5;213m",S="\033[38;5;228m";
+
+        // 内容行（纯内容，不含左右边框 ║）
+        String[] inner = {
+            "  "+A+"███████╗"+W+" "+P+"█████╗"+W+" "+S+"███████╗"+W+" "+A+"██╗   ██╗"+W,
+            "  "+A+"██╔════╝"+W+" "+P+"██╔══██╗"+W+S+"██╔════╝"+W+" "+A+"╚██╗ ██╔╝"+W,
+            "  "+A+"█████╗  "+W+" "+P+"███████║"+W+S+"███████╗"+W+" "+A+" ╚████╔╝"+W,
+            "  "+A+"██╔══╝  "+W+" "+P+"██╔══██║"+W+S+"╚════██║"+W+" "+A+"  ╚██╔╝"+W,
+            "  "+A+"███████╗"+W+" "+P+"██║  ██║"+W+S+"███████║"+W+" "+A+"   ██║"+W,
+            "  "+A+"╚══════╝"+W+" "+P+"╚═╝  ╚═╝"+W+S+"╚══════╝"+W+" "+A+"   ╚═╝"+W,
+            "",
+            "     "+B+"AI Coding Agent"+W+D+"  v1.0"+W,
+            "     "+D+"读/写/改文件 · 执行命令 · 搜索代码"+W,
+            "     "+D+"Java 17 · JLine · Anthropic / OpenAI"+W,
+            "",
+        };
+
+        String cmd1 = "  "+G+"/permission"+W+D+" 权限"+W+"  │  "
+                    + G+"/compact"+W+D+" 压缩"+W+"  │  "
+                    + G+"/session"+W+D+" 会话"+W;
+        String cmd2 = "  "+G+"/help"+W+D+" 帮助"+W+"  │  "
+                    + G+"/exit"+W+D+" 退出"+W+"  │  "
+                    + G+"/about"+W+D+" 关于"+W;
+        String tip  = "  "+D+"直接输入问题开始对话，/ 开头执行内置命令"+W;
+
+        // 计算最大内容宽度——不含左右边框
+        int w = 42;
+        for (String s : inner) w = Math.max(w, colWidth(s));
+        w = Math.max(w, colWidth(cmd1));
+        w = Math.max(w, colWidth(cmd2));
+        w = Math.max(w, colWidth(tip));
+
+        String h  = "═".repeat(w);   // 双线（顶/底）
+        String hs = "─".repeat(w);   // 单线（分隔）
+
         System.out.println();
-        System.out.println(C+"  \u2554\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550"+W);
-        System.out.println(C+"  \u2551"+W+"  "+A+"\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2557"+W+" "+P+" \u2588\u2588\u2588\u2588\u2588\u2557"+W+" "+S+"\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2557"+W+" "+A+"\u2588\u2588\u2557   \u2588\u2588\u2557"+W+"   "+C+"\u2551"+W);
-        System.out.println(C+"  \u2551"+W+"  "+A+"\u2588\u2588\u2594\u2550\u2550\u2550\u2550\u255D"+W+" "+P+"\u2588\u2588\u2594\u2550\u2550\u2588\u2588\u2557"+W+""+S+"\u2588\u2588\u2594\u2550\u2550\u2550\u2550\u255D"+W+" "+A+"\u255A\u2588\u2588\u2557 \u2588\u2588\u2594\u255D"+W+"   "+C+"\u2551"+W);
-        System.out.println(C+"  \u2551"+W+"  "+A+"\u2588\u2588\u2588\u2588\u2588\u2557  "+W+" "+P+"\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2551"+W+""+S+"\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2557"+W+" "+A+" \u255A\u2588\u2588\u2588\u2588\u2594\u255D"+W+"    "+C+"\u2551"+W);
-        System.out.println(C+"  \u2551"+W+"  "+A+"\u2588\u2588\u2594\u2550\u2550\u255D  "+W+" "+P+"\u2588\u2588\u2594\u2550\u2550\u2588\u2588\u2551"+W+""+S+"\u255A\u2550\u2550\u2550\u2550\u2588\u2588\u2551"+W+" "+A+"  \u255A\u2588\u2588\u2594\u255D"+W+"     "+C+"\u2551"+W);
-        System.out.println(C+"  \u2551"+W+"  "+A+"\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2557"+W+" "+P+"\u2588\u2588\u2551  \u2588\u2588\u2551"+W+""+S+"\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2551"+W+" "+A+"   \u2588\u2588\u2551"+W+"      "+C+"\u2551"+W);
-        System.out.println(C+"  \u2551"+W+"  "+A+"\u255A\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u255D"+W+" "+P+"\u255A\u2550\u255D  \u255A\u2550\u255D"+W+""+S+"\u255A\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u255D"+W+" "+A+"   \u255A\u2550\u255D"+W+"      "+C+"\u2551"+W);
-        System.out.println(C+"  \u2551"+W+"                                          "+C+"\u2551"+W);
-        System.out.println(C+"  \u2551"+W+"     "+B+"AI Coding Agent"+W+D+"  v1.0"+W+"                     "+C+"\u2551"+W);
-        System.out.println(C+"  \u2551"+W+"     "+D+"读/写/改文件 \u00b7 执行命令 \u00b7 搜索代码"+W+"       "+C+"\u2551"+W);
-        System.out.println(C+"  \u2551"+W+"     "+D+"Java 17 \u00b7 JLine \u00b7 Anthropic / OpenAI"+W+"       "+C+"\u2551"+W);
-        System.out.println(C+"  \u2551"+W+"                                          "+C+"\u2551"+W);
-        System.out.println(C+"  \u255F"+W+D+"\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500"+W+C+"\u2562"+W);
-        System.out.println(C+"  \u2551"+W+"  "+G+"/permission"+W+D+" 权限"+W+"  \u2502  "+G+"/compact"+W+D+" 压缩"+W+"  \u2502  "+G+"/session"+W+D+" 会话"+W+"  \u2502  "+G+"/help"+W+D+" 帮助"+W+"  \u2502  "+G+"/exit"+W+D+" 退出"+W+"  "+C+"\u2551"+W);
-        System.out.println(C+"  \u2551"+W+"  "+D+"直接输入问题开始对话，/ 开头执行内置命令"+W+"       "+C+"\u2551"+W);
-        System.out.println(C+"  \u255A\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550"+W);
+        System.out.println(C+"  ╔"+h+"╗"+W);
+        for (String s : inner) System.out.println(C+"  ║"+W+" "+padTo(s,w)+" "+C+"║"+W);
+        System.out.println(C+"  ╟"+D+hs+C+"╢"+W);
+        System.out.println(C+"  ║"+W+" "+padTo(cmd1,w)+" "+C+"║"+W);
+        System.out.println(C+"  ║"+W+" "+padTo(cmd2,w)+" "+C+"║"+W);
+        System.out.println(C+"  ║"+W+" "+padTo(tip, w)+" "+C+"║"+W);
+        System.out.println(C+"  ╚"+h+"╝"+W);
         System.out.println();
     }
 
+    /** 去除 ANSI 码后的终端列宽（中文等宽字符计 2 列） */
+    private static int colWidth(String s) {
+        String clean = ANSI.matcher(s).replaceAll("");
+        int w = 0;
+        for (int i = 0; i < clean.length(); i++) {
+            char c = clean.charAt(i);
+            if (Character.isHighSurrogate(c) && i + 1 < clean.length()
+                    && Character.isLowSurrogate(clean.charAt(i + 1))) {
+                w += 2; i++;
+            } else if (Character.UnicodeBlock.of(c) == Character.UnicodeBlock.CJK_UNIFIED_IDEOGRAPHS
+                    || Character.UnicodeBlock.of(c) == Character.UnicodeBlock.CJK_SYMBOLS_AND_PUNCTUATION) {
+                w += 2;
+            } else {
+                w += 1;
+            }
+        }
+        return w;
+    }
+
+    /** 补齐空格到目标列宽 */
+    private static String padTo(String s, int targetCols) {
+        int cur = colWidth(s);
+        if (cur >= targetCols) return s;
+        return s + " ".repeat(targetCols - cur);
+    }
     // ======================== 对话流程 ========================
 
     private void startStreamingChat(String um) {
@@ -140,6 +194,7 @@ public final class Tui implements UiController {
         startTime = System.currentTimeMillis();
         lastEventWasTool = false;
         currentPreamble = new StringBuilder();
+        agentPrefixShown = false;
         mdBold = mdCode = mdPendingStar = false;
         mdAtLineStart = true;
         mdHeadingHashes = 0;
@@ -152,6 +207,10 @@ public final class Tui implements UiController {
         if (e instanceof AgentEvent.TextDelta td) {
             if (spinnerRunning) { stopSpinner(); System.out.println(); }
             if (lastEventWasTool) System.out.println();
+            if (!agentPrefixShown) {
+                agentPrefixShown = true;
+                System.out.print(green + bold + "  \u25b8 " + reset);
+            }
             renderMarkdown(td.text());
             currentPreamble.append(td.text());
             lastEventWasTool = false;
